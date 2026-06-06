@@ -1,0 +1,18 @@
+[package]
+name = "wryview"
+version = "0.1.0"
+edition = "2021"
+description = "Comprehensive Python binding for wry — embeddable cross-platform webview."
+
+[lib]
+name = "wryview"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.28", features = ["extension-module"] }
+wry = { version = "0.53", features = ["devtools"] }
+raw-window-handle = "0.6"
+
+[profile.release]
+lto = true
+codegen-units = 1
