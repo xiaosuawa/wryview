@@ -12,7 +12,7 @@
 
 ## ⚠️ 早期开发阶段
 
-wryview 处于早期开发阶段，API 可能在不同版本间发生变动。本项目是为 [QtWebView2](https://github.com/xiaosuawa/QtWebView2) 服务的，作者是 Rust 新手——绑定代码可能不够完善。欢迎反馈、报告 Bug、贡献代码或想法。
+wryview 处于早期开发阶段，API 可能在不同版本间发生变动。本项目是为 [QtWebView](https://github.com/xiaosuawa/QtWebView) 服务的，作者是 Rust 新手——绑定代码可能不够完善。欢迎反馈、报告 Bug、贡献代码或想法。
 
 ---
 
@@ -57,9 +57,10 @@ wv.set_ipc_handler(lambda msg: print(f"JS 发来: {msg}"))
 # 页面生命周期回调
 wv.set_on_page_load(lambda event, url: print(f"{event}: {url}"))
 
-# 自定义协议（拦截请求）
-def my_handler(method, uri, headers, body):
-    return (200, {"Content-Type": "text/html"}, b"<h1>来自 Python 的问候！</h1>")
+# 自定义协议（异步拦截请求）
+def my_handler(method, uri, headers, body, respond):
+    # respond(status, headers, body) 可在任意线程中调用
+    respond(200, {"Content-Type": "text/html"}, b"<h1>来自 Python 的问候！</h1>")
 
 wv = WebView(hwnd, custom_protocols={"myapp": my_handler}, url="myapp://localhost/")
 ```
@@ -79,6 +80,10 @@ wv = WebView(hwnd, custom_protocols={"myapp": my_handler}, url="myapp://localhos
 | 其他 | `zoom`, `print`, `clear_all_browsing_data` |
 
 构造参数还包括：`transparent`、`background_color`、`incognito`、`user_agent`、`autoplay`、`initialization_script`、`proxy`、`back_forward_gestures`、`clipboard` 等。
+
+## 🧩 使用案例
+
+- **[QtWebView](https://github.com/xiaosuawa/QtWebView)** — 基于 wryview 的跨平台 Qt webview 组件（PySide/PyQt）。将 wry WebView 作为原生子窗口嵌入 Qt widget，提供 JS Bridge 和 WSGI 支持。
 
 ## 🤝 贡献
 

@@ -12,7 +12,7 @@
 
 ## ⚠️ Status: Pre-Alpha
 
-wryview is in early development. The API may change without notice between versions. It was created to serve [QtWebView2](https://github.com/xiaosuawa/QtWebView2), a Qt webview widget project, and the author is a Rust beginner — the binding code may not be idiomatic. Feedback, bug reports, and contributions (code or ideas) are very welcome.
+wryview is in early development. The API may change without notice between versions. It was created to serve [QtWebView](https://github.com/xiaosuawa/QtWebView), a Qt webview widget project, and the author is a Rust beginner — the binding code may not be idiomatic. Feedback, bug reports, and contributions (code or ideas) are very welcome.
 
 ---
 
@@ -57,9 +57,10 @@ wv.set_ipc_handler(lambda msg: print(f"JS says: {msg}"))
 # Navigation callback
 wv.set_on_page_load(lambda event, url: print(f"{event}: {url}"))
 
-# Custom protocol (intercept requests)
-def my_handler(method, uri, headers, body):
-    return (200, {"Content-Type": "text/html"}, b"<h1>Hello from Python!</h1>")
+# Custom protocol (intercept requests asynchronously)
+def my_handler(method, uri, headers, body, respond):
+    # respond(status, headers, body) must be called from any thread
+    respond(200, {"Content-Type": "text/html"}, b"<h1>Hello from Python!</h1>")
 
 wv = WebView(hwnd, custom_protocols={"myapp": my_handler}, url="myapp://localhost/")
 ```
@@ -79,6 +80,10 @@ wv = WebView(hwnd, custom_protocols={"myapp": my_handler}, url="myapp://localhos
 | Other | `zoom`, `print`, `clear_all_browsing_data` |
 
 Full constructor options: `transparent`, `background_color`, `incognito`, `user_agent`, `autoplay`, `initialization_script`, `proxy`, `back_forward_gestures`, `clipboard`, and more.
+
+## 🧩 Used By
+
+- **[QtWebView](https://github.com/xiaosuawa/QtWebView)** — A cross-platform webview widget for Qt (PySide/PyQt), powered by wryview. Embeds a wry WebView as a native child window inside any Qt widget, with a seamless JS bridge and WSGI support.
 
 ## 🤝 Contributing
 

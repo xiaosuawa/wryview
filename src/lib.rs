@@ -33,6 +33,7 @@ struct WebView {
     title_cb: Arc<Mutex<Option<pyo3::Py<pyo3::PyAny>>>>,
     newwin_cb: Arc<Mutex<Option<pyo3::Py<pyo3::PyAny>>>>,
     drag_drop_cb: Arc<Mutex<Option<pyo3::Py<pyo3::PyAny>>>>,
+    _web_context: Option<wry::WebContext>,
 }
 
 use std::collections::HashMap;
@@ -74,6 +75,8 @@ impl WebView {
         proxy = None,
         back_forward_gestures = false,
         clipboard = true,
+        data_directory = None,
+        headers = None,
     ))]
     fn new(
         parent_hwnd: isize,
@@ -102,6 +105,8 @@ impl WebView {
         proxy: Option<HashMap<String, String>>,
         back_forward_gestures: bool,
         clipboard: bool,
+        data_directory: Option<String>,
+        headers: Option<pyo3::Py<pyo3::PyAny>>,
     ) -> PyResult<Self> {
         // ── Build native window handle ─────────────────────────────────
         use raw_window_handle::{RawWindowHandle, Win32WindowHandle};
@@ -232,7 +237,14 @@ impl WebView {
         };
 
         // ── Build ──────────────────────────────────────────────────────
-        let mut builder = wry::WebViewBuilder::new()
+        let mut web_context = data_directory
+            .map(|d| wry::WebContext::new(Some(std::path::PathBuf::from(d))));
+        let mut builder = if let Some(ref mut ctx) = web_context {
+            wry::WebViewBuilder::new_with_web_context(ctx)
+        } else {
+            wry::WebViewBuilder::new()
+        };
+        builder = builder
             .with_bounds(rect_from_bounds(0.0, 0.0, width as f64, height as f64))
             .with_transparent(transparent)
             .with_visible(visible)
@@ -261,42 +273,44 @@ impl WebView {
         };
 
         for (name, handler) in protocol_handlers {
-            builder = builder.with_custom_protocol(
+            let handler_clone = handler.clone_ref(unsafe { Python::assume_attached() });
+            builder = builder.with_asynchronous_custom_protocol(
                 name,
-                move |_webview_id: &str, request: wry::http::Request<Vec<u8>>| {
+                move |_id: wry::WebViewId, request: wry::http::Request<Vec<u8>>, responder: wry::RequestAsyncResponder| {
+                    let h = handler_clone.clone_ref(unsafe { Python::assume_attached() });
                     Python::attach(|py| {
-                        let handler = handler.clone_ref(py);
+                        let handler = h.clone_ref(py);
                         let method = request.method().to_string();
                         let uri = request.uri().to_string();
-                        let mut headers = HashMap::new();
+                        let mut headers: Vec<(String, String)> = Vec::new();
                         for (k, v) in request.headers().iter() {
-                            headers.insert(
-                                k.as_str().to_string(),
-                                v.to_str().unwrap_or("").to_string(),
-                            );
+                            headers.push((k.as_str().to_string(), v.to_str().unwrap_or("").to_string()));
                         }
                         let body = request.body().clone();
-                        let req = (method, uri, headers, body);
-                        let result = handler.call1(py, req);
-                        let (status, resp_headers, resp_body): (
-                            u16,
-                            HashMap<String, String>,
-                            Vec<u8>,
-                        ) = match result {
-                            Ok(r) => r.extract(py).unwrap_or((
-                                500,
-                                HashMap::new(),
-                                b"Internal Server Error".to_vec(),
-                            )),
-                            Err(_) => (500, HashMap::new(), b"Internal Server Error".to_vec()),
-                        };
-                        let mut resp_builder = wry::http::Response::builder().status(status);
-                        for (k, v) in &resp_headers {
-                            resp_builder = resp_builder.header(k.as_str(), v.as_str());
-                        }
-                        resp_builder
-                            .body(std::borrow::Cow::Owned(resp_body))
-                            .unwrap()
+
+                        // Wrap responder as Python callable
+                        struct SendCell(std::sync::Mutex<Option<wry::RequestAsyncResponder>>);
+                        unsafe impl Send for SendCell {}
+                        let cell = SendCell(std::sync::Mutex::new(Some(responder)));
+                        let respond = pyo3::types::PyCFunction::new_closure(
+                            py, None, None,
+                            move |args: &pyo3::Bound<'_, pyo3::types::PyTuple>, _kwargs: Option<&pyo3::Bound<'_, pyo3::types::PyDict>>| {
+                                let mut guard = cell.0.lock().unwrap();
+                                if let Some(r) = guard.take() {
+                                    let status: u16 = args.get_item(0).ok().and_then(|v| v.extract::<u16>().ok()).unwrap_or(500);
+                                    let resp_headers: Vec<(String, String)> = args.get_item(1).ok().and_then(|v| v.extract().ok()).unwrap_or_default();
+                                    let resp_body: Vec<u8> = args.get_item(2).ok().and_then(|v| v.extract().ok()).unwrap_or_default();
+                                    let mut builder = wry::http::Response::builder().status(status);
+                                    for (k, v) in &resp_headers {
+                                        builder = builder.header(k.as_str(), v.as_str());
+                                    }
+                                    let _ = r.respond(builder.body(std::borrow::Cow::Owned(resp_body)).unwrap());
+                                }
+                                Ok::<_, pyo3::PyErr>(unsafe { Python::assume_attached() }.None())
+                            }
+                        ).unwrap();
+
+                        let _ = handler.call(py, (method, uri, headers, body, respond), None);
                     })
                 },
             );
@@ -325,6 +339,26 @@ impl WebView {
         if let Some(ref ua) = user_agent {
             builder = builder.with_user_agent(ua);
         }
+        if let Some(ref h) = headers {
+            let py = unsafe { Python::assume_attached() };
+            let bound = h.bind(py);
+            let pairs: Vec<(String, String)> = bound.extract::<Vec<(String, String)>>().ok()
+                .or_else(|| {
+                    let dict: HashMap<String, String> = bound.extract().ok()?;
+                    Some(dict.into_iter().collect())
+                })
+                .unwrap_or_default();
+            let mut header_map = wry::http::HeaderMap::new();
+            for (k, v) in pairs {
+                if let (Ok(name), Ok(value)) = (
+                    wry::http::header::HeaderName::from_bytes(k.as_bytes()),
+                    wry::http::header::HeaderValue::from_str(&v),
+                ) {
+                    header_map.insert(name, value);
+                }
+            }
+            builder = builder.with_headers(header_map);
+        }
         if let Some(ref script) = initialization_script {
             builder = builder.with_initialization_script(script);
         }
@@ -347,6 +381,7 @@ impl WebView {
             title_cb,
             newwin_cb,
             drag_drop_cb,
+            _web_context: web_context,
         })
     }
 
@@ -368,14 +403,21 @@ impl WebView {
         }
     }
 
-    fn load_url_with_headers(&self, url: &str, headers: HashMap<String, String>) {
+    fn load_url_with_headers(&self, _py: Python<'_>, url: &str, headers: pyo3::Bound<'_, pyo3::PyAny>) {
         if let Ok(guard) = self.inner.lock() {
             if let Some(ref wv) = *guard {
                 let mut header_map = wry::http::HeaderMap::new();
-                for (k, v) in &headers {
+                // Try Vec<(String, String)> first, then HashMap<String, String>
+                let pairs: Vec<(String, String)> = headers.extract::<Vec<(String, String)>>().ok()
+                    .or_else(|| {
+                        let dict: HashMap<String, String> = headers.extract().ok()?;
+                        Some(dict.into_iter().collect())
+                    })
+                    .unwrap_or_default();
+                for (k, v) in pairs {
                     if let (Ok(name), Ok(value)) = (
                         wry::http::header::HeaderName::from_bytes(k.as_bytes()),
-                        wry::http::header::HeaderValue::from_str(v),
+                        wry::http::header::HeaderValue::from_str(&v),
                     ) {
                         header_map.insert(name, value);
                     }
@@ -603,12 +645,18 @@ impl WebView {
         }
     }
 
-    fn delete_cookie(&self, name: &str, _url: &str) {
-        use wry::cookie::Cookie;
-        let cookie = Cookie::build((name, "")).path("/").build();
+    fn delete_cookie(&self, name: &str, url: &str) {
+        // Try to find matching cookies for the given URL first,
+        // then delete each one by name.
         if let Ok(guard) = self.inner.lock() {
             if let Some(ref wv) = *guard {
-                let _ = wv.delete_cookie(&cookie);
+                if let Ok(cookies) = wv.cookies_for_url(url) {
+                    for c in cookies {
+                        if c.name() == name {
+                            let _ = wv.delete_cookie(&c);
+                        }
+                    }
+                }
             }
         }
     }

@@ -1,4 +1,4 @@
-from typing import Callable, Optional
+from typing import Callable, Optional, Union
 
 
 class CookieDict:
@@ -46,16 +46,20 @@ class WebView:
             on_page_load: Optional[Callable[[str, str], None]] = None,
             on_title_changed: Optional[Callable[[str], None]] = None,
             on_new_window: Optional[Callable[[str], str]] = None,
-        drag_drop_handler: Optional[Callable[[str, list[str], tuple[int, int]], bool]] = None,
-        custom_protocols: Optional[dict[str, Callable[[str, str, dict[str, str], bytes], tuple[int, dict[str, str], bytes]]]] = None,
-        proxy: Optional[dict[str, str]] = None,
-        back_forward_gestures: bool = False,
-        clipboard: bool = True,
+            drag_drop_handler: Optional[Callable[[str, list[str], tuple[int, int]], bool]] = None,
+            custom_protocols: Optional[
+                dict[str, Callable[[str, str, list[tuple[str, str]], bytes, Callable[[int, list[tuple[str, str]], bytes], None]], None]]
+            ] = None,
+            proxy: Optional[dict[str, str]] = None,
+            back_forward_gestures: bool = False,
+            clipboard: bool = True,
+            data_directory: Optional[str] = None,
+            headers: Optional[Union[dict[str, str], list[tuple[str, str]]]] = None,
     ) -> None: ...
 
     def load_url(self, url: str) -> None: ...
 
-    def load_url_with_headers(self, url: str, headers: dict[str, str]) -> None: ...
+    def load_url_with_headers(self, url: str, headers: Union[dict[str, str], list[tuple[str, str]]]) -> None: ...
 
     def load_html(self, html: str) -> None: ...
 

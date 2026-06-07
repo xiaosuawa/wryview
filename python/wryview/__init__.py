@@ -2,7 +2,7 @@
 wryview — Minimal wry webview binding for Python.
 
 Usage:
-    from wryview import WebView
+    from wryview import WebView, CookieDict
 
     # Create webview as child of a Qt widget's HWND
     wv = WebView(int(widget.winId()))
@@ -16,8 +16,14 @@ Usage:
     wv.set_ipc_handler(on_message)
 
     # JS side:  window.ipc.postMessage('hello from JS')
+
+    # Cookies
+    cookies = wv.cookies()
+    for c in cookies:
+        print(f"{c.name} = {c.value}")
 """
 
-from wryview._core import WebView
+from wryview._core import WebView, CookieDict
 
-__all__ = ["WebView"]
+__version__ = "0.2.0"
+__all__ = ["WebView", "CookieDict"]
