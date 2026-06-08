@@ -77,6 +77,7 @@ impl WebView {
         clipboard = true,
         data_directory = None,
         headers = None,
+        as_child = true,
     ))]
     fn new(
         parent_hwnd: isize,
@@ -107,6 +108,7 @@ impl WebView {
         clipboard: bool,
         data_directory: Option<String>,
         headers: Option<pyo3::Py<pyo3::PyAny>>,
+        as_child: bool,
     ) -> PyResult<Self> {
         // ── Build native window handle ─────────────────────────────────
         use raw_window_handle::{RawWindowHandle, Win32WindowHandle};
@@ -369,9 +371,12 @@ impl WebView {
             builder = builder.with_html(h);
         }
 
-        let webview = builder
-            .build_as_child(&window_handle)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+        let webview = if as_child {
+            builder.build_as_child(&window_handle)
+        } else {
+            builder.build(&window_handle)
+        }
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
 
         Ok(Self {
             inner: Mutex::new(Some(webview)),
@@ -507,6 +512,40 @@ impl WebView {
     fn set_drag_drop_handler(&self, handler: pyo3::Py<pyo3::PyAny>) {
         if let Ok(mut g) = self.drag_drop_cb.lock() {
             *g = Some(handler);
+        }
+    }
+
+    // ── Reparent ────────────────────────────────────────────────────────────
+
+    /// Re-attach the webview to a different parent window.
+    ///
+    /// **Windows**: *new_parent* must be a valid ``HWND``.
+    ///
+    /// **macOS**: *new_parent* **must** be an ``NSWindow`` pointer.  Passing
+    /// an ``NSView`` or any other value will crash.  Set a breakpoint or log
+    /// before calling this if you're unsure.
+    ///
+    /// **Linux**: no-op — the underlying API needs a GTK container, not a raw
+    /// XID, and X11 does not destroy child windows when the parent is hidden.
+    fn reparent(&self, new_parent: isize) {
+        if let Ok(guard) = self.inner.lock() {
+            if let Some(ref wv) = *guard {
+                #[cfg(target_os = "windows")]
+                {
+                    use wry::WebViewExtWindows;
+                    let _ = wv.reparent(new_parent);
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    use wry::WebViewExtMacOS;
+                    let _ = wv.reparent(new_parent as *mut _);
+                }
+                #[cfg(all(unix, not(target_os = "macos")))]
+                {
+                    // wry reparent needs a GTK container, not a raw XID.
+                    let _ = (wv, new_parent);
+                }
+            }
         }
     }
 

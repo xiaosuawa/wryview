@@ -4,8 +4,11 @@ wryview — Minimal wry webview binding for Python.
 Usage:
     from wryview import WebView, CookieDict
 
-    # Create webview as child of a Qt widget's HWND
+    # Embed as child window (default)
     wv = WebView(int(widget.winId()))
+
+    # Fill an independent window (wry manages size automatically)
+    wv = WebView(int(anchor.winId()), as_child=False)
     wv.load_url("https://example.com")
     wv.eval_js("document.body.style.background = 'red'")
 
@@ -25,5 +28,5 @@ Usage:
 
 from wryview._core import WebView, CookieDict
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 __all__ = ["WebView", "CookieDict"]

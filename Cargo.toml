@@ -1,6 +1,6 @@
 [package]
 name = "wryview"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Comprehensive Python binding for wry — embeddable cross-platform webview."
 

@@ -45,8 +45,11 @@ pip install wryview
 ```python
 from wryview import WebView
 
-# Create a webview as a child of any native window
+# Embed as a child of any native window (default)
 wv = WebView(parent_hwnd, url="https://example.com", devtools=True)
+
+# Fill an independent window — wry manages size via WM_SIZE / layout
+wv = WebView(anchor_hwnd, url="https://example.com", as_child=False)
 
 # JS execution
 wv.eval_js("document.body.style.background = '#333'")

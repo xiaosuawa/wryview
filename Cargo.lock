@@ -2332,7 +2332,7 @@ dependencies = [
 
 [[package]]
 name = "wryview"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "pyo3",
  "raw-window-handle",

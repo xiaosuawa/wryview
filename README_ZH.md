@@ -45,8 +45,11 @@ pip install wryview
 ```python
 from wryview import WebView
 
-# 嵌入任意原生窗口
+# 嵌入任意原生窗口作为子控件（默认模式）
 wv = WebView(parent_hwnd, url="https://example.com", devtools=True)
+
+# 填充独立窗口 — wry 通过 WM_SIZE / layout 自动管理大小
+wv = WebView(anchor_hwnd, url="https://example.com", as_child=False)
 
 # JS 执行
 wv.eval_js("document.body.style.background = '#333'")
