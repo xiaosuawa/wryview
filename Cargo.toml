@@ -1,6 +1,6 @@
 [package]
 name = "wryview"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 description = "Comprehensive Python binding for wry — embeddable cross-platform webview."
 
@@ -12,6 +12,9 @@ crate-type = ["cdylib"]
 pyo3 = { version = "0.28", features = ["extension-module"] }
 wry = { version = "0.55", features = ["devtools"] }
 raw-window-handle = "0.6"
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+gtk = "0.18"
 
 [profile.release]
 lto = true

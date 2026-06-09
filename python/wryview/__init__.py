@@ -26,7 +26,7 @@ Usage:
         print(f"{c.name} = {c.value}")
 """
 
-from wryview._core import WebView, CookieDict
+from wryview._core import WebView, CookieDict, pump_events, ensure_gtk_init
 
-__version__ = "0.3.0"
-__all__ = ["WebView", "CookieDict"]
+__version__ = "0.3.1"
+__all__ = ["WebView", "CookieDict", "pump_events", "ensure_gtk_init"]

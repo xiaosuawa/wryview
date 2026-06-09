@@ -110,15 +110,39 @@ impl WebView {
         headers: Option<pyo3::Py<pyo3::PyAny>>,
         as_child: bool,
     ) -> PyResult<Self> {
-        // ── Build native window handle ─────────────────────────────────
-        use raw_window_handle::{RawWindowHandle, Win32WindowHandle};
+        // ── Build native window handle (platform-specific) ───────────
+        #[cfg(target_os = "windows")]
+        let window_handle = {
+            use raw_window_handle::{RawWindowHandle, Win32WindowHandle};
+            let hwnd_nz = NonZero::new(parent_hwnd).ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("parent_hwnd is null")
+            })?;
+            let win32 = Win32WindowHandle::new(hwnd_nz);
+            let raw = RawWindowHandle::Win32(win32);
+            unsafe { raw_window_handle::WindowHandle::borrow_raw(raw) }
+        };
 
-        let hwnd_nz = NonZero::new(parent_hwnd).ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>("parent_hwnd is null")
-        })?;
-        let win32 = Win32WindowHandle::new(hwnd_nz);
-        let raw = RawWindowHandle::Win32(win32);
-        let window_handle = unsafe { raw_window_handle::WindowHandle::borrow_raw(raw) };
+        #[cfg(target_os = "macos")]
+        let window_handle = {
+            use raw_window_handle::{AppKitWindowHandle, RawWindowHandle};
+            let ns_view = NonZero::new(parent_hwnd).ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("parent_hwnd is null")
+            })?;
+            let appkit = AppKitWindowHandle::new(ns_view);
+            let raw = RawWindowHandle::AppKit(appkit);
+            unsafe { raw_window_handle::WindowHandle::borrow_raw(raw) }
+        };
+
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let window_handle = {
+            use raw_window_handle::{RawWindowHandle, XlibWindowHandle};
+            if parent_hwnd == 0 {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("parent_hwnd is null"));
+            }
+            let xlib = XlibWindowHandle::new(parent_hwnd as u64);
+            let raw = RawWindowHandle::Xlib(xlib);
+            unsafe { raw_window_handle::WindowHandle::borrow_raw(raw) }
+        };
 
         // ── Callback slots ─────────────────────────────────────────────
         let ipc_cb: Arc<Mutex<Option<pyo3::Py<pyo3::PyAny>>>> = Arc::new(Mutex::new(ipc_handler));
@@ -371,6 +395,23 @@ impl WebView {
             builder = builder.with_html(h);
         }
 
+        // ── GTK init (Linux only, idempotent) ──────────────────────────
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            match gtk::init() {
+                Ok(()) => { /* GTK initialized */ }
+                Err(ref e) => {
+                    // "already initialized" is harmless — gtk::init() is idempotent
+                    if !gtk::is_initialized() {
+                        return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                            format!("GTK init failed: {}. Is $DISPLAY set?", e),
+                        ));
+                    }
+                }
+            }
+        }
+
+        // ── Build the webview ──────────────────────────────────────────
         let webview = if as_child {
             builder.build_as_child(&window_handle)
         } else {
@@ -751,11 +792,56 @@ impl CookieDict {
     }
 }
 
+// ── Platform event pump ─────────────────────────────────────────────────
+///
+/// Pump platform-specific events (no-op on Windows/macOS).
+///
+/// On Linux, call this periodically (e.g. via ``QTimer`` at ~60 fps) to
+/// keep WebKitGTK rendering when the host app runs a non-GTK event loop
+/// such as Qt's xcb backend.
+///
+/// This is a module-level function — it does not belong to any single
+/// ``WebView`` instance.
+#[pyfunction]
+fn pump_events() {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        // Process pending GTK/GLib events without blocking.
+        // Equivalent to Python: while Gtk.events_pending(): Gtk.main_iteration_do(False)
+        while gtk::main_iteration_do(false) {
+            // keep pumping while events remain
+        }
+    }
+    // Windows / macOS: nothing needed — the native webview integrates with
+    // the same event loop that Qt uses (Windows message pump / NSRunLoop).
+}
+
+/// Initialise GTK from Rust's perspective (no-op on Windows/macOS).
+///
+/// Python's ``gi.repository.Gtk.init()`` calls C's ``gtk_init()``, which
+/// initialises GTK at the OS level.  However the Rust ``gtk`` crate tracks
+/// initialisation state in a *separate* static ``AtomicBool``, and the
+/// ``webkit2gtk`` crate (which wry uses internally on Linux) checks that
+/// Rust-level flag.
+///
+/// Call this **once** before creating the first ``WebView`` on Linux.  It is
+/// idempotent — safe to call after Python's ``Gtk.init()`` or multiple times.
+#[pyfunction]
+fn ensure_gtk_init() {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let _ = gtk::init(); // idempotent; sets the Rust IS_INITIALIZED atomic
+    }
+    // Windows / macOS: nothing needed
+}
+
 // ── Module ─────────────────────────────────────────────────────────────────
 
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<WebView>()?;
     m.add_class::<CookieDict>()?;
+    m.add_function(wrap_pyfunction!(pump_events, m)?)?;
+    m.add_function(wrap_pyfunction!(ensure_gtk_init, m)?)?;
     Ok(())
 }
