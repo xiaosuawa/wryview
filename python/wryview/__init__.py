@@ -28,5 +28,5 @@ Usage:
 
 from wryview._core import WebView, CookieDict, pump_events, ensure_gtk_init
 
-__version__ = "0.3.1"
+__version__ = "0.3.2"
 __all__ = ["WebView", "CookieDict", "pump_events", "ensure_gtk_init"]
