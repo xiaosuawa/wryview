@@ -125,7 +125,9 @@ impl WebView {
         #[cfg(target_os = "macos")]
         let window_handle = {
             use raw_window_handle::{AppKitWindowHandle, RawWindowHandle};
-            let ns_view = NonZero::new(parent_hwnd).ok_or_else(|| {
+            use std::ptr::NonNull;
+            let ptr = parent_hwnd as *mut std::ffi::c_void;
+            let ns_view = NonNull::new(ptr).ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyValueError, _>("parent_hwnd is null")
             })?;
             let appkit = AppKitWindowHandle::new(ns_view);
