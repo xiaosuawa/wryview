@@ -332,7 +332,13 @@ impl WebView {
                                     for (k, v) in &resp_headers {
                                         builder = builder.header(k.as_str(), v.as_str());
                                     }
-                                    let _ = r.respond(builder.body(std::borrow::Cow::Owned(resp_body)).unwrap());
+                                    let response =
+                                        builder.body(std::borrow::Cow::Owned(resp_body)).unwrap();
+                                    Python::attach(|py| {
+                                        py.detach(move || {
+                                            let _ = r.respond(response);
+                                        });
+                                    });
                                 }
                                 Ok::<_, pyo3::PyErr>(unsafe { Python::assume_attached() }.None())
                             }
