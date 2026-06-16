@@ -1,6 +1,25 @@
 """Type stubs for wryview._core — the native WebView binding."""
 
 from typing import Callable, Optional, Union
+from enum import Enum
+
+
+class PageLoadEvent(Enum):
+    Started = 0
+    Finished = 1
+
+
+class NewWindowResponse(Enum):
+    Allow = 0
+    Deny = 1
+
+
+class DragDropEvent(Enum):
+    Enter = 0
+    Over = 1
+    Drop = 2
+    Leave = 3
+    Unknown = 4
 
 
 class CookieDict:
@@ -59,10 +78,10 @@ class WebView:
             initialization_script: Optional[str] = None,
             ipc_handler: Optional[Callable[[str], None]] = None,
             on_navigation: Optional[Callable[[str], bool]] = None,
-            on_page_load: Optional[Callable[[str, str], None]] = None,
+            on_page_load: Optional[Callable[[PageLoadEvent, str], None]] = None,
             on_title_changed: Optional[Callable[[str], None]] = None,
-            on_new_window: Optional[Callable[[str], str]] = None,
-            drag_drop_handler: Optional[Callable[[str, list[str], tuple[int, int]], bool]] = None,
+            on_new_window: Optional[Callable[[str], Union[NewWindowResponse, str]]] = None,
+            drag_drop_handler: Optional[Callable[[DragDropEvent, list[str], tuple[int, int]], bool]] = None,
             custom_protocols: Optional[
                 dict[str, Callable[[str, str, list[tuple[str, str]], bytes,
                                     Callable[[int, list[tuple[str, str]], bytes], None]], None]]
@@ -72,6 +91,10 @@ class WebView:
             clipboard: bool = True,
             data_directory: Optional[str] = None,
             headers: Optional[Union[dict[str, str], list[tuple[str, str]]]] = None,
+            https_scheme: bool = False,
+            default_context_menus: bool = True,
+            on_download_started: Optional[Callable[[str, str], Union[bool, str]]] = None,
+            on_download_completed: Optional[Callable[[str, Optional[str], bool], None]] = None,
             as_child: bool = True,
     ) -> None:
         """Create a WebView.
@@ -87,13 +110,16 @@ class WebView:
                 white page background.
             background_color: RGBA tuple, e.g. ``(255, 255, 255, 255)``.
             visible: Whether the webview is initially visible.
-            devtools: Enable browser DevTools (F12 / right-click → Inspect).
+            devtools: Enable browser DevTools (right-click → Inspect, F12).
             incognito: Incognito / private mode — no persistent storage.
+                Windows: requires WebView2 Runtime ≥ 101.0.1210.39.
             user_agent: Custom User-Agent string.
             focused: Whether the webview should receive keyboard focus.
-            autoplay: Allow media autoplay.
+                Windows/Linux only; macOS unsupported.
+            autoplay: Allow media autoplay without user interaction.
             javascript_enabled: Enable JavaScript execution.  Default ``True``.
             hotkeys_zoom: Enable ``Ctrl +`` / ``Ctrl -`` zoom shortcuts.
+                Windows only.
             initialization_script: JavaScript injected on every page load
                 (before any page scripts run).
             ipc_handler: Callable ``(message: str)`` — receives messages from
@@ -113,8 +139,19 @@ class WebView:
                 Call ``respond(status, headers, body)`` to reply (any thread OK).
             proxy: Dict with ``"type"`` (``"http"`` or ``"socks5"``), ``"host"``,
                 and ``"port"``.
-            back_forward_gestures: Enable swipe-back/forward (macOS only).
-            clipboard: Enable clipboard access.  Default ``True``.
+            back_forward_gestures: Enable two-finger swipe for back/forward
+                navigation.
+            clipboard: Enable clipboard access (Windows/Linux).  Default ``True``.
+                macOS always enabled, regardless of this setting.
+            https_scheme: Use ``https://`` instead of ``http://`` for custom
+                protocol workaround (Windows only).  Makes the page a secure
+                context, enabling Service Workers, Geolocation, Web Crypto, etc.
+            default_context_menus: Enable native right-click context menu.
+                Windows only.  Default ``True``.
+            on_download_started: Callable ``(url, suggested_path) -> bool|str``.
+                Return ``False`` to cancel, or a new path string to redirect.
+            on_download_completed: Callable ``(url, saved_path, success)``.
+                *saved_path* is ``None`` if the download was cancelled.
             data_directory: Path for persistent user data (cache, cookies, etc.).
                 Creates the directory if it doesn't exist.
             headers: Custom HTTP headers sent with every request.  Accepts
@@ -165,17 +202,25 @@ class WebView:
     def set_on_navigation(self, handler: Callable[[str], bool]) -> None:
         """Set navigation handler.  Return ``False`` to block."""
 
-    def set_on_page_load(self, handler: Callable[[str, str], None]) -> None:
-        """Set page-load handler.  Receives ``(event, url)``."""
+    def set_on_page_load(self, handler: Callable[[PageLoadEvent, str], None]) -> None:
+        """Set page-load handler.  Receives ``(event: PageLoadEvent, url)``."""
 
     def set_on_title_changed(self, handler: Callable[[str], None]) -> None:
         """Set title-changed handler."""
 
-    def set_on_new_window(self, handler: Callable[[str], str]) -> None:
-        """Set new-window handler.  Return ``"allow"`` or ``"deny"``."""
+    def set_on_new_window(self, handler: Callable[[str], Union[NewWindowResponse, str]]) -> None:
+        """Set new-window handler.  Return ``NewWindowResponse`` or ``"allow"/"deny"`` (backward compat)."""
 
-    def set_drag_drop_handler(self, handler: Callable[[str, list[str], tuple[int, int]], bool]) -> None:
-        """Set drag-drop handler.  Receives ``(event_type, paths, position)``."""
+    def set_drag_drop_handler(self, handler: Callable[[DragDropEvent, list[str], tuple[int, int]], bool]) -> None:
+        """Set drag-drop handler.  Receives ``(event: DragDropEvent, paths, position)``."""
+
+    def set_on_download_started(self, handler: Callable[[str, str], Union[bool, str]]) -> None:
+        """Set download-started handler.  Receives ``(url, suggested_path)``.
+        Return ``False`` to cancel, a new path string to redirect."""
+
+    def set_on_download_completed(self, handler: Callable[[str, Optional[str], bool], None]) -> None:
+        """Set download-completed handler.  Receives ``(url, saved_path, success)``.
+        *saved_path* is ``None`` if cancelled."""
 
     # ── Reparent ───────────────────────────────────────────────────────────
 
@@ -245,3 +290,12 @@ class WebView:
 
     def clear_all_browsing_data(self) -> None:
         """Clear all browsing data (cache, cookies, storage)."""
+
+
+# ── Module-level functions ────────────────────────────────────────────────
+
+def pump_events() -> None:
+    """Pump pending GTK/GLib events (Linux only, no-op elsewhere)."""
+
+def ensure_gtk_init() -> None:
+    """Initialise GTK from Rust's perspective (Linux only, no-op elsewhere)."""

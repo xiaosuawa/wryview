@@ -33,6 +33,8 @@ struct WebView {
     title_cb: Arc<Mutex<Option<pyo3::Py<pyo3::PyAny>>>>,
     newwin_cb: Arc<Mutex<Option<pyo3::Py<pyo3::PyAny>>>>,
     drag_drop_cb: Arc<Mutex<Option<pyo3::Py<pyo3::PyAny>>>>,
+    download_started_cb: Arc<Mutex<Option<pyo3::Py<pyo3::PyAny>>>>,
+    download_completed_cb: Arc<Mutex<Option<pyo3::Py<pyo3::PyAny>>>>,
     _web_context: Option<wry::WebContext>,
 }
 
@@ -75,8 +77,12 @@ impl WebView {
         proxy = None,
         back_forward_gestures = false,
         clipboard = true,
+        https_scheme = false,
+        default_context_menus = true,
         data_directory = None,
         headers = None,
+        on_download_started = None,
+        on_download_completed = None,
         as_child = true,
     ))]
     fn new(
@@ -106,8 +112,12 @@ impl WebView {
         proxy: Option<HashMap<String, String>>,
         back_forward_gestures: bool,
         clipboard: bool,
+        https_scheme: bool,
+        default_context_menus: bool,
         data_directory: Option<String>,
         headers: Option<pyo3::Py<pyo3::PyAny>>,
+        on_download_started: Option<pyo3::Py<pyo3::PyAny>>,
+        on_download_completed: Option<pyo3::Py<pyo3::PyAny>>,
         as_child: bool,
     ) -> PyResult<Self> {
         // ── Build native window handle (platform-specific) ───────────
@@ -157,6 +167,10 @@ impl WebView {
             Arc::new(Mutex::new(on_new_window));
         let drag_drop_cb: Arc<Mutex<Option<pyo3::Py<pyo3::PyAny>>>> =
             Arc::new(Mutex::new(drag_drop_handler));
+        let download_started_cb: Arc<Mutex<Option<pyo3::Py<pyo3::PyAny>>>> =
+            Arc::new(Mutex::new(on_download_started));
+        let download_completed_cb: Arc<Mutex<Option<pyo3::Py<pyo3::PyAny>>>> =
+            Arc::new(Mutex::new(on_download_completed));
         let protocols: Arc<Mutex<HashMap<String, pyo3::Py<pyo3::PyAny>>>> =
             Arc::new(Mutex::new(custom_protocols.unwrap_or_default()));
 
@@ -190,8 +204,8 @@ impl WebView {
         let pageload_cb_clone = pageload_cb.clone();
         let pageload_handler = move |event: wry::PageLoadEvent, url: String| {
             let evt = match event {
-                wry::PageLoadEvent::Started => "Started",
-                wry::PageLoadEvent::Finished => "Finished",
+                wry::PageLoadEvent::Started => PageLoadEvent::Started,
+                wry::PageLoadEvent::Finished => PageLoadEvent::Finished,
             };
             Python::attach(|py| {
                 if let Ok(guard) = pageload_cb_clone.lock() {
@@ -220,10 +234,10 @@ impl WebView {
                     if let Ok(guard) = newwin_cb_clone.lock() {
                         if let Some(ref func) = *guard {
                             if let Ok(result) = func.call1(py, (url.as_str(),)) {
-                                if let Ok(response) = result.extract::<String>(py) {
-                                    return match response.as_str() {
-                                        "deny" => wry::NewWindowResponse::Deny,
-                                        _ => wry::NewWindowResponse::Allow,
+                                if let Ok(resp) = result.extract::<NewWindowResponse>(py) {
+                                    return match resp {
+                                        NewWindowResponse::Deny => wry::NewWindowResponse::Deny,
+                                        NewWindowResponse::Allow => wry::NewWindowResponse::Allow,
                                     };
                                 }
                             }
@@ -241,14 +255,14 @@ impl WebView {
                     if let Some(ref func) = *guard {
                         let (evt_type, paths, position) = match &event {
                             wry::DragDropEvent::Enter { paths: p, position } => {
-                                ("Enter", p.clone(), *position)
+                                (DragDropEvent::Enter, p.clone(), *position)
                             }
-                            wry::DragDropEvent::Over { position } => ("Over", vec![], *position),
+                            wry::DragDropEvent::Over { position } => (DragDropEvent::Over, vec![], *position),
                             wry::DragDropEvent::Drop { paths: p, position } => {
-                                ("Drop", p.clone(), *position)
+                                (DragDropEvent::Drop, p.clone(), *position)
                             }
-                            wry::DragDropEvent::Leave => ("Leave", vec![], (0, 0)),
-                            _ => return false,
+                            wry::DragDropEvent::Leave => (DragDropEvent::Leave, vec![], (0, 0)),
+                            _ => (DragDropEvent::Unknown, vec![], (0, 0)),
                         };
                         let paths_str: Vec<String> = paths
                             .iter()
@@ -261,6 +275,38 @@ impl WebView {
                     }
                 }
                 false
+            })
+        };
+
+        // download started handler
+        let download_started_cb_clone = download_started_cb.clone();
+        let download_started_handler = move |url: String, path: &mut std::path::PathBuf| -> bool {
+            Python::attach(|py| {
+                if let Ok(guard) = download_started_cb_clone.lock() {
+                    if let Some(ref func) = *guard {
+                        let path_str = path.to_string_lossy().to_string();
+                        if let Ok(result) = func.call1(py, (url.as_str(), path_str)) {
+                            if let Ok(new_path) = result.extract::<String>(py) {
+                                *path = std::path::PathBuf::from(new_path);
+                            }
+                            return result.extract::<bool>(py).unwrap_or(true);
+                        }
+                    }
+                }
+                true // default: allow download
+            })
+        };
+
+        // download completed handler
+        let download_completed_cb_clone = download_completed_cb.clone();
+        let download_completed_handler = move |url: String, path: Option<std::path::PathBuf>, success: bool| {
+            Python::attach(|py| {
+                if let Ok(guard) = download_completed_cb_clone.lock() {
+                    if let Some(ref func) = *guard {
+                        let path_str = path.map(|p| p.to_string_lossy().to_string());
+                        let _ = func.call1(py, (url.as_str(), path_str, success));
+                    }
+                }
             })
         };
 
@@ -288,7 +334,9 @@ impl WebView {
             .with_on_page_load_handler(pageload_handler)
             .with_document_title_changed_handler(title_handler)
             .with_new_window_req_handler(newwin_handler)
-            .with_drag_drop_handler(drag_drop_handler);
+            .with_drag_drop_handler(drag_drop_handler)
+            .with_download_started_handler(download_started_handler)
+            .with_download_completed_handler(download_completed_handler);
 
         // custom protocols — extract before iterating to avoid borrow conflict
         let protocol_handlers: Vec<(String, pyo3::Py<pyo3::PyAny>)> = {
@@ -367,6 +415,26 @@ impl WebView {
         if !javascript_enabled {
             builder = builder.with_javascript_disabled();
         }
+        // https_scheme: custom protocol uses https:// prefix → secure context.
+        // Windows (WebView2) only — WebView2 converts custom schemes to
+        // http://{name}.{path} by default; https_scheme makes it https://.
+        // macOS / Linux use native <scheme>://{path} and don't need this.
+        if https_scheme {
+            #[cfg(target_os = "windows")]
+            {
+                use wry::WebViewBuilderExtWindows;
+                builder = builder.with_https_scheme(true);
+            }
+            // non-Windows: silently ignored (already native scheme, no workaround)
+        }
+        // default_context_menus: Windows only — enable/disable native right-click menu.
+        if !default_context_menus {
+            #[cfg(target_os = "windows")]
+            {
+                use wry::WebViewBuilderExtWindows;
+                builder = builder.with_default_context_menus(false);
+            }
+        }
         if let Some(bg) = background_color {
             builder = builder.with_background_color(bg);
         }
@@ -435,6 +503,8 @@ impl WebView {
             title_cb,
             newwin_cb,
             drag_drop_cb,
+            download_started_cb,
+            download_completed_cb,
             _web_context: web_context,
         })
     }
@@ -560,6 +630,18 @@ impl WebView {
 
     fn set_drag_drop_handler(&self, handler: pyo3::Py<pyo3::PyAny>) {
         if let Ok(mut g) = self.drag_drop_cb.lock() {
+            *g = Some(handler);
+        }
+    }
+
+    fn set_on_download_started(&self, handler: pyo3::Py<pyo3::PyAny>) {
+        if let Ok(mut g) = self.download_started_cb.lock() {
+            *g = Some(handler);
+        }
+    }
+
+    fn set_on_download_completed(&self, handler: pyo3::Py<pyo3::PyAny>) {
+        if let Ok(mut g) = self.download_completed_cb.lock() {
             *g = Some(handler);
         }
     }
@@ -768,6 +850,32 @@ impl WebView {
     }
 }
 
+// ── Enums ──────────────────────────────────────────────────────────────────
+
+#[pyclass(eq, frozen, skip_from_py_object)]
+#[derive(Clone, PartialEq)]
+enum PageLoadEvent {
+    Started,
+    Finished,
+}
+
+#[pyclass(eq, frozen, from_py_object)]
+#[derive(Clone, PartialEq)]
+enum NewWindowResponse {
+    Allow,
+    Deny,
+}
+
+#[pyclass(eq, frozen, skip_from_py_object)]
+#[derive(Clone, PartialEq)]
+enum DragDropEvent {
+    Enter,
+    Over,
+    Drop,
+    Leave,
+    Unknown,
+}
+
 // ── Cookie dict helper ────────────────────────────────────────────────────
 
 #[pyclass(skip_from_py_object)]
@@ -849,6 +957,9 @@ fn ensure_gtk_init() {
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<WebView>()?;
     m.add_class::<CookieDict>()?;
+    m.add_class::<PageLoadEvent>()?;
+    m.add_class::<NewWindowResponse>()?;
+    m.add_class::<DragDropEvent>()?;
     m.add_function(wrap_pyfunction!(pump_events, m)?)?;
     m.add_function(wrap_pyfunction!(ensure_gtk_init, m)?)?;
     Ok(())
