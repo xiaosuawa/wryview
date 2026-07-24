@@ -28,12 +28,12 @@ Usage:
 
 from wryview._core import (
     WebView, CookieDict, PageLoadEvent, NewWindowResponse, DragDropEvent,
-    pump_events, ensure_gtk_init,
+    pump_events, ensure_gtk_init, WindowHandleKind
 )
 
 __version__ = "0.4.0"
 __all__ = [
     "WebView", "CookieDict",
     "PageLoadEvent", "NewWindowResponse", "DragDropEvent",
-    "pump_events", "ensure_gtk_init",
+    "pump_events", "ensure_gtk_init", "WindowHandleKind"
 ]

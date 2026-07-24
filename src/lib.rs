@@ -6,6 +6,8 @@
 ///
 /// No event loop, no window management — just the webview.
 use pyo3::prelude::*;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::num::NonZero;
 use std::sync::{Arc, Mutex};
 
@@ -22,27 +24,84 @@ fn rect_from_bounds(x: f64, y: f64, width: f64, height: f64) -> wry::Rect {
     make_rect(x, y, width, height)
 }
 
-// ── The Python class ───────────────────────────────────────────────────────
+// ── Callbacks: all Python callbacks in one struct (single Arc) ─────────────
 
-#[pyclass]
-struct WebView {
-    inner: Mutex<Option<wry::WebView>>,
-    ipc_cb: Arc<Mutex<Option<pyo3::Py<pyo3::PyAny>>>>,
-    nav_cb: Arc<Mutex<Option<pyo3::Py<pyo3::PyAny>>>>,
-    pageload_cb: Arc<Mutex<Option<pyo3::Py<pyo3::PyAny>>>>,
-    title_cb: Arc<Mutex<Option<pyo3::Py<pyo3::PyAny>>>>,
-    newwin_cb: Arc<Mutex<Option<pyo3::Py<pyo3::PyAny>>>>,
-    drag_drop_cb: Arc<Mutex<Option<pyo3::Py<pyo3::PyAny>>>>,
-    download_started_cb: Arc<Mutex<Option<pyo3::Py<pyo3::PyAny>>>>,
-    download_completed_cb: Arc<Mutex<Option<pyo3::Py<pyo3::PyAny>>>>,
-    _web_context: Option<wry::WebContext>,
+struct Callbacks {
+    ipc: Mutex<Option<pyo3::Py<pyo3::PyAny>>>,
+    nav: Mutex<Option<pyo3::Py<pyo3::PyAny>>>,
+    page_load: Mutex<Option<pyo3::Py<pyo3::PyAny>>>,
+    title: Mutex<Option<pyo3::Py<pyo3::PyAny>>>,
+    new_win: Mutex<Option<pyo3::Py<pyo3::PyAny>>>,
+    drag_drop: Mutex<Option<pyo3::Py<pyo3::PyAny>>>,
+    download_started: Mutex<Option<pyo3::Py<pyo3::PyAny>>>,
+    download_completed: Mutex<Option<pyo3::Py<pyo3::PyAny>>>,
 }
 
-use std::collections::HashMap;
+// ── Build native window handle (platform-specific, extracted for clarity) ──
 
-// SAFETY: Python GIL ensures single-threaded access to the webview.
-unsafe impl Send for WebView {}
-unsafe impl Sync for WebView {}
+fn build_window_handle(
+    parent_hwnd: isize,
+    #[allow(unused_variables)] parent_hwnd_kind: Option<&WindowHandleKind>,
+) -> PyResult<raw_window_handle::WindowHandle<'_>> {
+    #[cfg(target_os = "windows")]
+    {
+        use raw_window_handle::{RawWindowHandle, Win32WindowHandle};
+        let hwnd_nz = NonZero::new(parent_hwnd).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>("parent_hwnd is null")
+        })?;
+        let win32 = Win32WindowHandle::new(hwnd_nz);
+        let raw = RawWindowHandle::Win32(win32);
+        // SAFETY: `borrow_raw` takes `RawWindowHandle` by value (move).
+        // The HWND value is copied into WindowHandle; the caller (Python side)
+        // is responsible for keeping the parent window alive.
+        Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(raw) })
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        use raw_window_handle::{AppKitWindowHandle, RawWindowHandle};
+        use std::ptr::NonNull;
+        let ptr = parent_hwnd as *mut std::ffi::c_void;
+        let ns_view = NonNull::new(ptr).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>("parent_hwnd is null")
+        })?;
+        let appkit = AppKitWindowHandle::new(ns_view);
+        let raw = RawWindowHandle::AppKit(appkit);
+        // SAFETY: `borrow_raw` takes `RawWindowHandle` by value (move).
+        // The NSView pointer is copied into WindowHandle; the caller is
+        // responsible for keeping the parent view alive.
+        Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(raw) })
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        // Only X11 uses raw window handles. GTK uses build_gtk (handled in
+        // the caller), and RawWindowHandle doesn't have a Wayland variant
+        // that wry accepts — wry's build/build_as_child only work with X11.
+        use raw_window_handle::{RawWindowHandle, XlibWindowHandle};
+        if parent_hwnd == 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "parent_hwnd is null",
+            ));
+        }
+        let raw = RawWindowHandle::Xlib(XlibWindowHandle::new(parent_hwnd as u64));
+        // SAFETY: `borrow_raw` takes `RawWindowHandle` by value (move).
+        // The XID is copied into WindowHandle; the caller is responsible
+        // for keeping the parent window alive.
+        Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(raw) })
+    }
+}
+
+// ── The Python class ───────────────────────────────────────────────────────
+
+#[pyclass(unsendable)]
+struct WebView {
+    // inner is only accessed from the Python thread (WebView is unsendable),
+    // so RefCell is the appropriate interior-mutability primitive here.
+    inner: RefCell<Option<wry::WebView>>,
+    callbacks: Arc<Callbacks>,
+    _web_context: Option<wry::WebContext>,
+}
 
 #[pymethods]
 impl WebView {
@@ -84,8 +143,10 @@ impl WebView {
         on_download_started = None,
         on_download_completed = None,
         as_child = true,
+        parent_hwnd_kind = None,
     ))]
     fn new(
+        py: Python<'_>,
         parent_hwnd: isize,
         width: u32,
         height: u32,
@@ -119,127 +180,119 @@ impl WebView {
         on_download_started: Option<pyo3::Py<pyo3::PyAny>>,
         on_download_completed: Option<pyo3::Py<pyo3::PyAny>>,
         as_child: bool,
+        #[allow(unused_variables)] parent_hwnd_kind: Option<WindowHandleKind>,
     ) -> PyResult<Self> {
-        // ── Build native window handle (platform-specific) ───────────
-        #[cfg(target_os = "windows")]
-        let window_handle = {
-            use raw_window_handle::{RawWindowHandle, Win32WindowHandle};
-            let hwnd_nz = NonZero::new(parent_hwnd).ok_or_else(|| {
-                PyErr::new::<pyo3::exceptions::PyValueError, _>("parent_hwnd is null")
-            })?;
-            let win32 = Win32WindowHandle::new(hwnd_nz);
-            let raw = RawWindowHandle::Win32(win32);
-            unsafe { raw_window_handle::WindowHandle::borrow_raw(raw) }
-        };
+        // ── Callback slots (single Arc, 8 Mutexes inside) ───────────────
+        let callbacks = Arc::new(Callbacks {
+            ipc: Mutex::new(ipc_handler),
+            nav: Mutex::new(on_navigation),
+            page_load: Mutex::new(on_page_load),
+            title: Mutex::new(on_title_changed),
+            new_win: Mutex::new(on_new_window),
+            drag_drop: Mutex::new(drag_drop_handler),
+            download_started: Mutex::new(on_download_started),
+            download_completed: Mutex::new(on_download_completed),
+        });
 
-        #[cfg(target_os = "macos")]
-        let window_handle = {
-            use raw_window_handle::{AppKitWindowHandle, RawWindowHandle};
-            use std::ptr::NonNull;
-            let ptr = parent_hwnd as *mut std::ffi::c_void;
-            let ns_view = NonNull::new(ptr).ok_or_else(|| {
-                PyErr::new::<pyo3::exceptions::PyValueError, _>("parent_hwnd is null")
-            })?;
-            let appkit = AppKitWindowHandle::new(ns_view);
-            let raw = RawWindowHandle::AppKit(appkit);
-            unsafe { raw_window_handle::WindowHandle::borrow_raw(raw) }
-        };
-
-        #[cfg(all(unix, not(target_os = "macos")))]
-        let window_handle = {
-            use raw_window_handle::{RawWindowHandle, XlibWindowHandle};
-            if parent_hwnd == 0 {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("parent_hwnd is null"));
-            }
-            let xlib = XlibWindowHandle::new(parent_hwnd as u64);
-            let raw = RawWindowHandle::Xlib(xlib);
-            unsafe { raw_window_handle::WindowHandle::borrow_raw(raw) }
-        };
-
-        // ── Callback slots ─────────────────────────────────────────────
-        let ipc_cb: Arc<Mutex<Option<pyo3::Py<pyo3::PyAny>>>> = Arc::new(Mutex::new(ipc_handler));
-        let nav_cb: Arc<Mutex<Option<pyo3::Py<pyo3::PyAny>>>> = Arc::new(Mutex::new(on_navigation));
-        let pageload_cb: Arc<Mutex<Option<pyo3::Py<pyo3::PyAny>>>> =
-            Arc::new(Mutex::new(on_page_load));
-        let title_cb: Arc<Mutex<Option<pyo3::Py<pyo3::PyAny>>>> =
-            Arc::new(Mutex::new(on_title_changed));
-        let newwin_cb: Arc<Mutex<Option<pyo3::Py<pyo3::PyAny>>>> =
-            Arc::new(Mutex::new(on_new_window));
-        let drag_drop_cb: Arc<Mutex<Option<pyo3::Py<pyo3::PyAny>>>> =
-            Arc::new(Mutex::new(drag_drop_handler));
-        let download_started_cb: Arc<Mutex<Option<pyo3::Py<pyo3::PyAny>>>> =
-            Arc::new(Mutex::new(on_download_started));
-        let download_completed_cb: Arc<Mutex<Option<pyo3::Py<pyo3::PyAny>>>> =
-            Arc::new(Mutex::new(on_download_completed));
         let protocols: Arc<Mutex<HashMap<String, pyo3::Py<pyo3::PyAny>>>> =
             Arc::new(Mutex::new(custom_protocols.unwrap_or_default()));
 
-        // ── wry callbacks (capture Arc clones) ─────────────────────────
-        let ipc_cb_clone = ipc_cb.clone();
+        // ── wry IPC handler ─────────────────────────────────────────────
+        let cb = callbacks.clone();
         let ipc_handler_wry = move |req: wry::http::Request<String>| {
             let body = req.body().clone();
             Python::attach(|py| {
-                if let Ok(guard) = ipc_cb_clone.lock() {
-                    if let Some(ref func) = *guard {
-                        let _ = func.call1(py, (body,));
+                // clone_ref only bumps refcount — no Python code, safe inside the lock
+                let func = cb
+                    .ipc
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.as_ref().map(|f| f.clone_ref(py)));
+                if let Some(ref func) = func {
+                    if let Err(e) = func.call1(py, (body,)) {
+                        e.write_unraisable(py, None);
                     }
                 }
             })
         };
 
-        let nav_cb_clone = nav_cb.clone();
+        // ── wry navigation handler ──────────────────────────────────────
+        let cb = callbacks.clone();
         let nav_handler = move |url: String| {
             Python::attach(|py| {
-                if let Ok(guard) = nav_cb_clone.lock() {
-                    if let Some(ref func) = *guard {
-                        if let Ok(result) = func.call1(py, (url.as_str(),)) {
-                            return result.extract::<bool>(py).unwrap_or(true);
-                        }
+                // clone_ref only bumps refcount — no Python code, safe inside the lock
+                let func = cb
+                    .nav
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.as_ref().map(|f| f.clone_ref(py)));
+                if let Some(ref func) = func {
+                    if let Ok(result) = func.call1(py, (url.as_str(),)) {
+                        return result.extract::<bool>(py).unwrap_or(true);
                     }
                 }
                 true // default: allow navigation
             })
         };
 
-        let pageload_cb_clone = pageload_cb.clone();
+        // ── wry page-load handler ───────────────────────────────────────
+        let cb = callbacks.clone();
         let pageload_handler = move |event: wry::PageLoadEvent, url: String| {
             let evt = match event {
                 wry::PageLoadEvent::Started => PageLoadEvent::Started,
                 wry::PageLoadEvent::Finished => PageLoadEvent::Finished,
             };
             Python::attach(|py| {
-                if let Ok(guard) = pageload_cb_clone.lock() {
-                    if let Some(ref func) = *guard {
-                        let _ = func.call1(py, (evt, url.as_str()));
+                // clone_ref only bumps refcount — no Python code, safe inside the lock
+                let func = cb
+                    .page_load
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.as_ref().map(|f| f.clone_ref(py)));
+                if let Some(ref func) = func {
+                    if let Err(e) = func.call1(py, (evt, url.as_str())) {
+                        e.write_unraisable(py, None);
                     }
                 }
             })
         };
 
-        let title_cb_clone = title_cb.clone();
+        // ── wry title handler ───────────────────────────────────────────
+        let cb = callbacks.clone();
         let title_handler = move |title: String| {
             Python::attach(|py| {
-                if let Ok(guard) = title_cb_clone.lock() {
-                    if let Some(ref func) = *guard {
-                        let _ = func.call1(py, (title.as_str(),));
+                // clone_ref only bumps refcount — no Python code, safe inside the lock
+                let func = cb
+                    .title
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.as_ref().map(|f| f.clone_ref(py)));
+                if let Some(ref func) = func {
+                    if let Err(e) = func.call1(py, (title.as_str(),)) {
+                        e.write_unraisable(py, None);
                     }
                 }
             })
         };
 
-        let newwin_cb_clone = newwin_cb.clone();
+        // ── wry new-window handler ──────────────────────────────────────
+        let cb = callbacks.clone();
         let newwin_handler =
             move |url: String, _features: wry::NewWindowFeatures| -> wry::NewWindowResponse {
                 Python::attach(|py| {
-                    if let Ok(guard) = newwin_cb_clone.lock() {
-                        if let Some(ref func) = *guard {
-                            if let Ok(result) = func.call1(py, (url.as_str(),)) {
-                                if let Ok(resp) = result.extract::<NewWindowResponse>(py) {
-                                    return match resp {
-                                        NewWindowResponse::Deny => wry::NewWindowResponse::Deny,
-                                        NewWindowResponse::Allow => wry::NewWindowResponse::Allow,
-                                    };
-                                }
+                    // clone_ref only bumps refcount — no Python code, safe inside the lock
+                    let func = cb
+                        .new_win
+                        .lock()
+                        .ok()
+                        .and_then(|g| g.as_ref().map(|f| f.clone_ref(py)));
+                    if let Some(ref func) = func {
+                        if let Ok(result) = func.call1(py, (url.as_str(),)) {
+                            if let Ok(resp) = result.extract::<NewWindowResponse>(py) {
+                                return match resp {
+                                    NewWindowResponse::Deny => wry::NewWindowResponse::Deny,
+                                    NewWindowResponse::Allow => wry::NewWindowResponse::Allow,
+                                };
                             }
                         }
                     }
@@ -247,72 +300,87 @@ impl WebView {
                 })
             };
 
-        // drag_drop handler
-        let drag_drop_cb_clone = drag_drop_cb.clone();
+        // ── wry drag-drop handler ───────────────────────────────────────
+        let cb = callbacks.clone();
         let drag_drop_handler = move |event: wry::DragDropEvent| -> bool {
+            let (evt_type, paths, position) = match &event {
+                wry::DragDropEvent::Enter { paths: p, position } => {
+                    (DragDropEvent::Enter, p.clone(), *position)
+                }
+                wry::DragDropEvent::Over { position } => (DragDropEvent::Over, vec![], *position),
+                wry::DragDropEvent::Drop { paths: p, position } => {
+                    (DragDropEvent::Drop, p.clone(), *position)
+                }
+                wry::DragDropEvent::Leave => (DragDropEvent::Leave, vec![], (0, 0)),
+                _ => (DragDropEvent::Unknown, vec![], (0, 0)),
+            };
             Python::attach(|py| {
-                if let Ok(guard) = drag_drop_cb_clone.lock() {
-                    if let Some(ref func) = *guard {
-                        let (evt_type, paths, position) = match &event {
-                            wry::DragDropEvent::Enter { paths: p, position } => {
-                                (DragDropEvent::Enter, p.clone(), *position)
-                            }
-                            wry::DragDropEvent::Over { position } => (DragDropEvent::Over, vec![], *position),
-                            wry::DragDropEvent::Drop { paths: p, position } => {
-                                (DragDropEvent::Drop, p.clone(), *position)
-                            }
-                            wry::DragDropEvent::Leave => (DragDropEvent::Leave, vec![], (0, 0)),
-                            _ => (DragDropEvent::Unknown, vec![], (0, 0)),
-                        };
-                        let paths_str: Vec<String> = paths
-                            .iter()
-                            .map(|p| p.to_string_lossy().to_string())
-                            .collect();
-                        let pos = (position.0, position.1);
-                        if let Ok(result) = func.call1(py, (evt_type, paths_str, pos)) {
-                            return result.extract::<bool>(py).unwrap_or(false);
-                        }
+                // clone_ref only bumps refcount — no Python code, safe inside the lock
+                let func = cb
+                    .drag_drop
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.as_ref().map(|f| f.clone_ref(py)));
+                if let Some(ref func) = func {
+                    let paths_str: Vec<String> = paths
+                        .iter()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .collect();
+                    let pos = (position.0, position.1);
+                    if let Ok(result) = func.call1(py, (evt_type, paths_str, pos)) {
+                        return result.extract::<bool>(py).unwrap_or(false);
                     }
                 }
                 false
             })
         };
 
-        // download started handler
-        let download_started_cb_clone = download_started_cb.clone();
+        // ── wry download-started handler ────────────────────────────────
+        let cb = callbacks.clone();
         let download_started_handler = move |url: String, path: &mut std::path::PathBuf| -> bool {
             Python::attach(|py| {
-                if let Ok(guard) = download_started_cb_clone.lock() {
-                    if let Some(ref func) = *guard {
-                        let path_str = path.to_string_lossy().to_string();
-                        if let Ok(result) = func.call1(py, (url.as_str(), path_str)) {
-                            if let Ok(new_path) = result.extract::<String>(py) {
-                                *path = std::path::PathBuf::from(new_path);
-                            }
-                            return result.extract::<bool>(py).unwrap_or(true);
+                // clone_ref only bumps refcount — no Python code, safe inside the lock
+                let func = cb
+                    .download_started
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.as_ref().map(|f| f.clone_ref(py)));
+                if let Some(ref func) = func {
+                    let path_str = path.to_string_lossy().to_string();
+                    if let Ok(result) = func.call1(py, (url.as_str(), path_str)) {
+                        if let Ok(new_path) = result.extract::<String>(py) {
+                            *path = std::path::PathBuf::from(new_path);
                         }
+                        return result.extract::<bool>(py).unwrap_or(true);
                     }
                 }
                 true // default: allow download
             })
         };
 
-        // download completed handler
-        let download_completed_cb_clone = download_completed_cb.clone();
-        let download_completed_handler = move |url: String, path: Option<std::path::PathBuf>, success: bool| {
-            Python::attach(|py| {
-                if let Ok(guard) = download_completed_cb_clone.lock() {
-                    if let Some(ref func) = *guard {
+        // ── wry download-completed handler ──────────────────────────────
+        let cb = callbacks.clone();
+        let download_completed_handler =
+            move |url: String, path: Option<std::path::PathBuf>, success: bool| {
+                Python::attach(|py| {
+                    // clone_ref only bumps refcount — no Python code, safe inside the lock
+                    let func = cb
+                        .download_completed
+                        .lock()
+                        .ok()
+                        .and_then(|g| g.as_ref().map(|f| f.clone_ref(py)));
+                    if let Some(ref func) = func {
                         let path_str = path.map(|p| p.to_string_lossy().to_string());
-                        let _ = func.call1(py, (url.as_str(), path_str, success));
+                        if let Err(e) = func.call1(py, (url.as_str(), path_str, success)) {
+                            e.write_unraisable(py, None);
+                        }
                     }
-                }
-            })
-        };
+                })
+            };
 
-        // ── Build ──────────────────────────────────────────────────────
-        let mut web_context = data_directory
-            .map(|d| wry::WebContext::new(Some(std::path::PathBuf::from(d))));
+        // ── Build wry WebViewBuilder ────────────────────────────────────
+        let mut web_context =
+            data_directory.map(|d| wry::WebContext::new(Some(std::path::PathBuf::from(d))));
         let mut builder = if let Some(ref mut ctx) = web_context {
             wry::WebViewBuilder::new_with_web_context(ctx)
         } else {
@@ -338,10 +406,9 @@ impl WebView {
             .with_download_started_handler(download_started_handler)
             .with_download_completed_handler(download_completed_handler);
 
-        // custom protocols — extract before iterating to avoid borrow conflict
+        // ── Custom protocols ────────────────────────────────────────────
         let protocol_handlers: Vec<(String, pyo3::Py<pyo3::PyAny>)> = {
             let guard = protocols.lock().unwrap();
-            let py = unsafe { Python::assume_attached() };
             guard
                 .iter()
                 .map(|(name, h)| (name.clone(), h.clone_ref(py)))
@@ -349,56 +416,84 @@ impl WebView {
         };
 
         for (name, handler) in protocol_handlers {
-            let handler_clone = handler.clone_ref(unsafe { Python::assume_attached() });
+            let handler_arc = Arc::new(handler);
             builder = builder.with_asynchronous_custom_protocol(
                 name,
-                move |_id: wry::WebViewId, request: wry::http::Request<Vec<u8>>, responder: wry::RequestAsyncResponder| {
-                    let h = handler_clone.clone_ref(unsafe { Python::assume_attached() });
+                move |_id: wry::WebViewId,
+                      request: wry::http::Request<Vec<u8>>,
+                      responder: wry::RequestAsyncResponder| {
+                    let h = Arc::clone(&handler_arc);
                     Python::attach(|py| {
-                        let handler = h.clone_ref(py);
+                        let handler = h.as_ref().clone_ref(py);
                         let method = request.method().to_string();
                         let uri = request.uri().to_string();
                         let mut headers: Vec<(String, String)> = Vec::new();
                         for (k, v) in request.headers().iter() {
-                            headers.push((k.as_str().to_string(), v.to_str().unwrap_or("").to_string()));
+                            headers.push((
+                                k.as_str().to_string(),
+                                v.to_str().unwrap_or("").to_string(),
+                            ));
                         }
                         let body = request.body().clone();
 
-                        // Wrap responder as Python callable
-                        struct SendCell(std::sync::Mutex<Option<wry::RequestAsyncResponder>>);
-                        unsafe impl Send for SendCell {}
-                        let cell = SendCell(std::sync::Mutex::new(Some(responder)));
+                        // Wrap responder as a Python callable.
+                        let cell = Arc::new(Mutex::new(Some(responder)));
                         let respond = pyo3::types::PyCFunction::new_closure(
-                            py, None, None,
-                            move |args: &pyo3::Bound<'_, pyo3::types::PyTuple>, _kwargs: Option<&pyo3::Bound<'_, pyo3::types::PyDict>>| {
-                                let mut guard = cell.0.lock().unwrap();
-                                if let Some(r) = guard.take() {
-                                    let status: u16 = args.get_item(0).ok().and_then(|v| v.extract::<u16>().ok()).unwrap_or(500);
-                                    let resp_headers: Vec<(String, String)> = args.get_item(1).ok().and_then(|v| v.extract().ok()).unwrap_or_default();
-                                    let resp_body: Vec<u8> = args.get_item(2).ok().and_then(|v| v.extract().ok()).unwrap_or_default();
-                                    let mut builder = wry::http::Response::builder().status(status);
-                                    for (k, v) in &resp_headers {
-                                        builder = builder.header(k.as_str(), v.as_str());
-                                    }
-                                    let response =
-                                        builder.body(std::borrow::Cow::Owned(resp_body)).unwrap();
-                                    Python::attach(|py| {
+                            py,
+                            None,
+                            None,
+                            move |args: &pyo3::Bound<'_, pyo3::types::PyTuple>,
+                                _kwargs: Option<
+                                    &pyo3::Bound<'_, pyo3::types::PyDict>,
+                                >| {
+                                if let Ok(mut r_opt) = cell.lock() {
+                                    if let Some(r) = r_opt.take() {
+                                        let status: u16 = args
+                                            .get_item(0)
+                                            .ok()
+                                            .and_then(|v| v.extract::<u16>().ok())
+                                            .unwrap_or(500);
+                                        let resp_headers: Vec<(String, String)> = args
+                                            .get_item(1)
+                                            .ok()
+                                            .and_then(|v| v.extract().ok())
+                                            .unwrap_or_default();
+                                        let resp_body: Vec<u8> = args
+                                            .get_item(2)
+                                            .ok()
+                                            .and_then(|v| v.extract().ok())
+                                            .unwrap_or_default();
+                                        let mut builder =
+                                            wry::http::Response::builder().status(status);
+                                        for (k, v) in &resp_headers {
+                                            builder = builder.header(k.as_str(), v.as_str());
+                                        }
+                                        let response = builder
+                                            .body(std::borrow::Cow::Owned(resp_body))
+                                            .unwrap();
+                                        drop(r_opt);
+                                        let py = args.py();
                                         py.detach(move || {
                                             let _ = r.respond(response);
                                         });
-                                    });
+                                    }
                                 }
-                                Ok::<_, pyo3::PyErr>(unsafe { Python::assume_attached() }.None())
-                            }
-                        ).unwrap();
+                                Ok::<_, pyo3::PyErr>(args.py().None())
+                            },
+                        )
+                        .unwrap();
 
-                        let _ = handler.call(py, (method, uri, headers, body, respond), None);
+                        if let Err(e) =
+                            handler.call(py, (method, uri, headers, body, respond), None)
+                        {
+                            e.write_unraisable(py, None);
+                        }
                     })
                 },
             );
         }
 
-        // proxy
+        // ── Proxy ───────────────────────────────────────────────────────
         if let Some(ref p) = proxy {
             use wry::ProxyConfig;
             let ep = wry::ProxyEndpoint {
@@ -412,6 +507,7 @@ impl WebView {
             builder = builder.with_proxy_config(cfg);
         }
 
+        // ── Remaining builder options ───────────────────────────────────
         if !javascript_enabled {
             builder = builder.with_javascript_disabled();
         }
@@ -441,10 +537,15 @@ impl WebView {
         if let Some(ref ua) = user_agent {
             builder = builder.with_user_agent(ua);
         }
+        // url must come before headers: with_url clears headers internally
+        if let Some(ref u) = url {
+            builder = builder.with_url(u);
+        }
         if let Some(ref h) = headers {
-            let py = unsafe { Python::assume_attached() };
             let bound = h.bind(py);
-            let pairs: Vec<(String, String)> = bound.extract::<Vec<(String, String)>>().ok()
+            let pairs: Vec<(String, String)> = bound
+                .extract::<Vec<(String, String)>>()
+                .ok()
                 .or_else(|| {
                     let dict: HashMap<String, String> = bound.extract().ok()?;
                     Some(dict.into_iter().collect())
@@ -464,9 +565,6 @@ impl WebView {
         if let Some(ref script) = initialization_script {
             builder = builder.with_initialization_script(script);
         }
-        if let Some(ref u) = url {
-            builder = builder.with_url(u);
-        }
         if let Some(ref h) = html {
             builder = builder.with_html(h);
         }
@@ -479,125 +577,187 @@ impl WebView {
                 Err(ref e) => {
                     // "already initialized" is harmless — gtk::init() is idempotent
                     if !gtk::is_initialized() {
-                        return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                            format!("GTK init failed: {}. Is $DISPLAY set?", e),
-                        ));
+                        return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                            "GTK init failed: {}. Is $DISPLAY set?",
+                            e
+                        )));
                     }
                 }
             }
         }
 
         // ── Build the webview ──────────────────────────────────────────
-        let webview = if as_child {
-            builder.build_as_child(&window_handle)
-        } else {
-            builder.build(&window_handle)
+        let webview = {
+            #[cfg(all(unix, not(target_os = "macos")))]
+            if parent_hwnd_kind == Some(&WindowHandleKind::Gtk) {
+                // GTK path — embeds directly in a GTK container.
+                // Works on both X11 and Wayland via GTK's backend abstraction.
+                use gtk::prelude::IsA;
+                let container =
+                    unsafe { gtk::Container::from_glib_none(parent_hwnd as *mut _) };
+                builder.build_gtk(&container)
+            } else {
+                let window_handle =
+                    build_window_handle(parent_hwnd, parent_hwnd_kind.as_ref())?;
+                if as_child {
+                    builder.build_as_child(&window_handle)
+                } else {
+                    builder.build(&window_handle)
+                }
+            }
+            #[cfg(not(all(unix, not(target_os = "macos"))))]
+            {
+                let window_handle =
+                    build_window_handle(parent_hwnd, parent_hwnd_kind.as_ref())?;
+                if as_child {
+                    builder.build_as_child(&window_handle)
+                } else {
+                    builder.build(&window_handle)
+                }
+            }
         }
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
 
         Ok(Self {
-            inner: Mutex::new(Some(webview)),
-            ipc_cb,
-            nav_cb,
-            pageload_cb,
-            title_cb,
-            newwin_cb,
-            drag_drop_cb,
-            download_started_cb,
-            download_completed_cb,
+            inner: RefCell::new(Some(webview)),
+            callbacks,
             _web_context: web_context,
         })
     }
 
     // ── Content ────────────────────────────────────────────────────────────
 
-    fn load_url(&self, url: &str) {
-        if let Ok(guard) = self.inner.lock() {
-            if let Some(ref wv) = *guard {
-                let _ = wv.load_url(url);
-            }
-        }
+    fn load_url(&self, url: &str) -> PyResult<()> {
+        let guard = self.inner.try_borrow().map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "RefCell borrow error: {}",
+                e
+            ))
+        })?;
+        let wv = guard.as_ref().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("WebView is already closed")
+        })?;
+        wv.load_url(url)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))
     }
 
-    fn load_html(&self, html: &str) {
-        if let Ok(guard) = self.inner.lock() {
-            if let Some(ref wv) = *guard {
-                let _ = wv.load_html(html);
-            }
-        }
+    fn load_html(&self, html: &str) -> PyResult<()> {
+        let guard = self.inner.try_borrow().map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "RefCell borrow error: {}",
+                e
+            ))
+        })?;
+        let wv = guard.as_ref().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("WebView is already closed")
+        })?;
+        wv.load_html(html)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))
     }
 
-    fn load_url_with_headers(&self, _py: Python<'_>, url: &str, headers: pyo3::Bound<'_, pyo3::PyAny>) {
-        if let Ok(guard) = self.inner.lock() {
-            if let Some(ref wv) = *guard {
-                let mut header_map = wry::http::HeaderMap::new();
-                // Try Vec<(String, String)> first, then HashMap<String, String>
-                let pairs: Vec<(String, String)> = headers.extract::<Vec<(String, String)>>().ok()
-                    .or_else(|| {
-                        let dict: HashMap<String, String> = headers.extract().ok()?;
-                        Some(dict.into_iter().collect())
-                    })
-                    .unwrap_or_default();
-                for (k, v) in pairs {
-                    if let (Ok(name), Ok(value)) = (
-                        wry::http::header::HeaderName::from_bytes(k.as_bytes()),
-                        wry::http::header::HeaderValue::from_str(&v),
-                    ) {
-                        header_map.insert(name, value);
-                    }
-                }
-                let _ = wv.load_url_with_headers(url, header_map);
+    fn load_url_with_headers(
+        &self,
+        _py: Python<'_>,
+        url: &str,
+        headers: pyo3::Bound<'_, pyo3::PyAny>,
+    ) -> PyResult<()> {
+        let guard = self.inner.try_borrow().map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "RefCell borrow error: {}",
+                e
+            ))
+        })?;
+        let wv = guard.as_ref().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("WebView is already closed")
+        })?;
+        let mut header_map = wry::http::HeaderMap::new();
+        let pairs: Vec<(String, String)> = headers
+            .extract::<Vec<(String, String)>>()
+            .ok()
+            .or_else(|| {
+                let dict: HashMap<String, String> = headers.extract().ok()?;
+                Some(dict.into_iter().collect())
+            })
+            .unwrap_or_default();
+        for (k, v) in pairs {
+            if let (Ok(name), Ok(value)) = (
+                wry::http::header::HeaderName::from_bytes(k.as_bytes()),
+                wry::http::header::HeaderValue::from_str(&v),
+            ) {
+                header_map.insert(name, value);
             }
         }
+        wv.load_url_with_headers(url, header_map)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))
     }
 
-    fn reload(&self) {
-        if let Ok(guard) = self.inner.lock() {
-            if let Some(ref wv) = *guard {
-                let _ = wv.reload();
-            }
-        }
+    fn reload(&self) -> PyResult<()> {
+        let guard = self.inner.try_borrow().map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "RefCell borrow error: {}",
+                e
+            ))
+        })?;
+        let wv = guard.as_ref().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("WebView is already closed")
+        })?;
+        wv.reload()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))
     }
 
     fn url(&self) -> Option<String> {
         self.inner
-            .lock()
+            .try_borrow()
             .ok()
             .and_then(|g| g.as_ref().and_then(|w| w.url().ok()))
     }
 
     // ── JavaScript ─────────────────────────────────────────────────────────
 
-    fn eval_js(&self, script: &str) {
-        if let Ok(guard) = self.inner.lock() {
-            if let Some(ref wv) = *guard {
-                let _ = wv.evaluate_script(script);
-            }
-        }
+    fn eval_js(&self, script: &str) -> PyResult<()> {
+        let guard = self.inner.try_borrow().map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "RefCell borrow error: {}",
+                e
+            ))
+        })?;
+        let wv = guard.as_ref().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("WebView is already closed")
+        })?;
+        wv.evaluate_script(script)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))
     }
 
-    fn eval_js_with_callback(&self, script: &str, callback: pyo3::Py<pyo3::PyAny>) {
-        if let Ok(guard) = self.inner.lock() {
-            if let Some(ref wv) = *guard {
-                let _ = wv.evaluate_script_with_callback(script, move |result: String| {
-                    Python::attach(|py| {
-                        let _ = callback.call1(py, (result,));
-                    })
-                });
-            }
-        }
+    fn eval_js_with_callback(&self, script: &str, callback: pyo3::Py<pyo3::PyAny>) -> PyResult<()> {
+        let guard = self.inner.try_borrow().map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "RefCell borrow error: {}",
+                e
+            ))
+        })?;
+        let wv = guard.as_ref().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("WebView is already closed")
+        })?;
+        wv.evaluate_script_with_callback(script, move |result: String| {
+            Python::attach(|py| {
+                if let Err(e) = callback.call1(py, (result,)) {
+                    e.write_unraisable(py, None);
+                }
+            })
+        })
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))
     }
 
     // ── IPC ────────────────────────────────────────────────────────────────
 
     fn set_ipc_handler(&self, handler: pyo3::Py<pyo3::PyAny>) {
-        if let Ok(mut guard) = self.ipc_cb.lock() {
+        if let Ok(mut guard) = self.callbacks.ipc.lock() {
             *guard = Some(handler);
         }
     }
 
     fn clear_ipc_handler(&self) {
-        if let Ok(mut guard) = self.ipc_cb.lock() {
+        if let Ok(mut guard) = self.callbacks.ipc.lock() {
             *guard = None;
         }
     }
@@ -605,43 +765,43 @@ impl WebView {
     // ── Callback setters ───────────────────────────────────────────────────
 
     fn set_on_navigation(&self, handler: pyo3::Py<pyo3::PyAny>) {
-        if let Ok(mut g) = self.nav_cb.lock() {
+        if let Ok(mut g) = self.callbacks.nav.lock() {
             *g = Some(handler);
         }
     }
 
     fn set_on_page_load(&self, handler: pyo3::Py<pyo3::PyAny>) {
-        if let Ok(mut g) = self.pageload_cb.lock() {
+        if let Ok(mut g) = self.callbacks.page_load.lock() {
             *g = Some(handler);
         }
     }
 
     fn set_on_title_changed(&self, handler: pyo3::Py<pyo3::PyAny>) {
-        if let Ok(mut g) = self.title_cb.lock() {
+        if let Ok(mut g) = self.callbacks.title.lock() {
             *g = Some(handler);
         }
     }
 
     fn set_on_new_window(&self, handler: pyo3::Py<pyo3::PyAny>) {
-        if let Ok(mut g) = self.newwin_cb.lock() {
+        if let Ok(mut g) = self.callbacks.new_win.lock() {
             *g = Some(handler);
         }
     }
 
     fn set_drag_drop_handler(&self, handler: pyo3::Py<pyo3::PyAny>) {
-        if let Ok(mut g) = self.drag_drop_cb.lock() {
+        if let Ok(mut g) = self.callbacks.drag_drop.lock() {
             *g = Some(handler);
         }
     }
 
     fn set_on_download_started(&self, handler: pyo3::Py<pyo3::PyAny>) {
-        if let Ok(mut g) = self.download_started_cb.lock() {
+        if let Ok(mut g) = self.callbacks.download_started.lock() {
             *g = Some(handler);
         }
     }
 
     fn set_on_download_completed(&self, handler: pyo3::Py<pyo3::PyAny>) {
-        if let Ok(mut g) = self.download_completed_cb.lock() {
+        if let Ok(mut g) = self.callbacks.download_completed.lock() {
             *g = Some(handler);
         }
     }
@@ -656,42 +816,57 @@ impl WebView {
     /// an ``NSView`` or any other value will crash.  Set a breakpoint or log
     /// before calling this if you're unsure.
     ///
-    /// **Linux**: no-op — the underlying API needs a GTK container, not a raw
-    /// XID, and X11 does not destroy child windows when the parent is hidden.
-    fn reparent(&self, new_parent: isize) {
-        if let Ok(guard) = self.inner.lock() {
-            if let Some(ref wv) = *guard {
-                #[cfg(target_os = "windows")]
-                {
-                    use wry::WebViewExtWindows;
-                    let _ = wv.reparent(new_parent);
-                }
-                #[cfg(target_os = "macos")]
-                {
-                    use wry::WebViewExtMacOS;
-                    let _ = wv.reparent(new_parent as *mut _);
-                }
-                #[cfg(all(unix, not(target_os = "macos")))]
-                {
-                    // wry reparent needs a GTK container, not a raw XID.
-                    let _ = (wv, new_parent);
-                }
-            }
+    /// **Linux**: not supported — the underlying API needs a GTK container,
+    /// not a raw XID.  Returns ``NotImplementedError``.
+    fn reparent(&self, new_parent: isize) -> PyResult<()> {
+        let guard = self.inner.try_borrow().map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "RefCell borrow error: {}",
+                e
+            ))
+        })?;
+        let wv = guard.as_ref().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("WebView is already closed")
+        })?;
+        #[cfg(target_os = "windows")]
+        {
+            use wry::WebViewExtWindows;
+            wv.reparent(new_parent)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
         }
+        #[cfg(target_os = "macos")]
+        {
+            use wry::WebViewExtMacOS;
+            wv.reparent(new_parent as *mut _)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+                "reparent is not supported on Linux X11/Wayland — wry needs a GTK container, not a raw XID",
+            ));
+        }
+        Ok(())
     }
 
     // ── Geometry ───────────────────────────────────────────────────────────
 
-    fn set_bounds(&self, x: f64, y: f64, width: f64, height: f64) {
-        if let Ok(guard) = self.inner.lock() {
-            if let Some(ref wv) = *guard {
-                let _ = wv.set_bounds(make_rect(x, y, width, height));
-            }
-        }
+    fn set_bounds(&self, x: f64, y: f64, width: f64, height: f64) -> PyResult<()> {
+        let guard = self.inner.try_borrow().map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "RefCell borrow error: {}",
+                e
+            ))
+        })?;
+        let wv = guard.as_ref().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("WebView is already closed")
+        })?;
+        wv.set_bounds(make_rect(x, y, width, height))
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))
     }
 
     fn bounds(&self) -> Option<(f64, f64, f64, f64)> {
-        self.inner.lock().ok().and_then(|g| {
+        self.inner.try_borrow().ok().and_then(|g| {
             g.as_ref().and_then(|w| {
                 w.bounds().ok().map(|r| {
                     let (x, y) = match r.position {
@@ -710,60 +885,96 @@ impl WebView {
 
     // ── Visibility ─────────────────────────────────────────────────────────
 
-    fn set_visible(&self, visible: bool) {
-        if let Ok(guard) = self.inner.lock() {
-            if let Some(ref wv) = *guard {
-                let _ = wv.set_visible(visible);
-            }
-        }
+    fn set_visible(&self, visible: bool) -> PyResult<()> {
+        let guard = self.inner.try_borrow().map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "RefCell borrow error: {}",
+                e
+            ))
+        })?;
+        let wv = guard.as_ref().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("WebView is already closed")
+        })?;
+        wv.set_visible(visible)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))
     }
 
-    fn set_background_color(&self, r: u8, g: u8, b: u8, a: u8) {
-        if let Ok(guard) = self.inner.lock() {
-            if let Some(ref wv) = *guard {
-                let _ = wv.set_background_color((r, g, b, a));
-            }
-        }
+    fn set_background_color(&self, r: u8, g: u8, b: u8, a: u8) -> PyResult<()> {
+        let guard = self.inner.try_borrow().map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "RefCell borrow error: {}",
+                e
+            ))
+        })?;
+        let wv = guard.as_ref().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("WebView is already closed")
+        })?;
+        wv.set_background_color((r, g, b, a))
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))
     }
 
-    fn focus(&self) {
-        if let Ok(guard) = self.inner.lock() {
-            if let Some(ref wv) = *guard {
-                let _ = wv.focus();
-            }
-        }
+    fn focus(&self) -> PyResult<()> {
+        let guard = self.inner.try_borrow().map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "RefCell borrow error: {}",
+                e
+            ))
+        })?;
+        let wv = guard.as_ref().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("WebView is already closed")
+        })?;
+        wv.focus()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))
     }
 
     // ── Zoom ───────────────────────────────────────────────────────────────
 
-    fn zoom(&self, scale: f64) {
-        if let Ok(guard) = self.inner.lock() {
-            if let Some(ref wv) = *guard {
-                let _ = wv.zoom(scale);
-            }
-        }
+    fn zoom(&self, scale: f64) -> PyResult<()> {
+        let guard = self.inner.try_borrow().map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "RefCell borrow error: {}",
+                e
+            ))
+        })?;
+        let wv = guard.as_ref().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("WebView is already closed")
+        })?;
+        wv.zoom(scale)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))
     }
 
     // ── DevTools ───────────────────────────────────────────────────────────
 
-    fn open_devtools(&self) {
-        if let Ok(guard) = self.inner.lock() {
-            if let Some(ref wv) = *guard {
-                wv.open_devtools();
-            }
-        }
+    fn open_devtools(&self) -> PyResult<()> {
+        let guard = self.inner.try_borrow().map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "RefCell borrow error: {}",
+                e
+            ))
+        })?;
+        let wv = guard.as_ref().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("WebView is already closed")
+        })?;
+        wv.open_devtools();
+        Ok(())
     }
 
-    fn close_devtools(&self) {
-        if let Ok(guard) = self.inner.lock() {
-            if let Some(ref wv) = *guard {
-                wv.close_devtools();
-            }
-        }
+    fn close_devtools(&self) -> PyResult<()> {
+        let guard = self.inner.try_borrow().map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "RefCell borrow error: {}",
+                e
+            ))
+        })?;
+        let wv = guard.as_ref().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("WebView is already closed")
+        })?;
+        wv.close_devtools();
+        Ok(())
     }
 
     fn is_devtools_open(&self) -> bool {
-        self.inner.lock().ok().map_or(false, |g| {
+        self.inner.try_borrow().ok().map_or(false, |g| {
             g.as_ref().map_or(false, |w| w.is_devtools_open())
         })
     }
@@ -773,11 +984,11 @@ impl WebView {
     fn cookies(&self) -> PyResult<Vec<CookieDict>> {
         let guard = self
             .inner
-            .lock()
+            .try_borrow()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
-        let wv = guard
-            .as_ref()
-            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("destroyed"))?;
+        let wv = guard.as_ref().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("WebView is already closed")
+        })?;
         let cookies = wv
             .cookies()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
@@ -787,18 +998,24 @@ impl WebView {
     fn cookies_for_url(&self, url: &str) -> PyResult<Vec<CookieDict>> {
         let guard = self
             .inner
-            .lock()
+            .try_borrow()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
-        let wv = guard
-            .as_ref()
-            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("destroyed"))?;
+        let wv = guard.as_ref().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("WebView is already closed")
+        })?;
         let cookies = wv
             .cookies_for_url(url)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
         Ok(cookies.into_iter().map(CookieDict::from_cookie).collect())
     }
 
-    fn set_cookie(&self, name: &str, value: &str, domain: Option<&str>, path: Option<&str>) {
+    fn set_cookie(
+        &self,
+        name: &str,
+        value: &str,
+        domain: Option<&str>,
+        path: Option<&str>,
+    ) -> PyResult<()> {
         use wry::cookie::Cookie;
         let mut builder = Cookie::build((name, value));
         if let Some(d) = domain {
@@ -808,66 +1025,124 @@ impl WebView {
             builder = builder.path(p);
         }
         let cookie = builder.build();
-        if let Ok(guard) = self.inner.lock() {
-            if let Some(ref wv) = *guard {
-                let _ = wv.set_cookie(&cookie);
-            }
-        }
+        let guard = self.inner.try_borrow().map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "RefCell borrow error: {}",
+                e
+            ))
+        })?;
+        let wv = guard.as_ref().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("WebView is already closed")
+        })?;
+        wv.set_cookie(&cookie)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))
     }
 
-    fn delete_cookie(&self, name: &str, url: &str) {
-        // Try to find matching cookies for the given URL first,
-        // then delete each one by name.
-        if let Ok(guard) = self.inner.lock() {
-            if let Some(ref wv) = *guard {
-                if let Ok(cookies) = wv.cookies_for_url(url) {
-                    for c in cookies {
-                        if c.name() == name {
-                            let _ = wv.delete_cookie(&c);
-                        }
-                    }
-                }
+    fn delete_cookie(&self, name: &str, url: &str) -> PyResult<()> {
+        let guard = self.inner.try_borrow().map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "RefCell borrow error: {}",
+                e
+            ))
+        })?;
+        let wv = guard.as_ref().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("WebView is already closed")
+        })?;
+        let cookies = wv
+            .cookies_for_url(url)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+        for c in cookies {
+            if c.name() == name {
+                wv.delete_cookie(&c).map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e))
+                })?;
             }
         }
+        Ok(())
+    }
+
+    /// Explicitly destroy the underlying WebView.
+    ///
+    /// Drops the native ``wry::WebView``, which runs WebView2 / WKWebView
+    /// cleanup (including window class unregistration on Windows) while
+    /// the parent window is still alive.
+    ///
+    /// Call this before program exit to avoid harmless but noisy errors
+    /// like "Failed to unregister class Chrome_WidgetWin_0" from deferred
+    /// cleanup.
+    fn close(&self) -> PyResult<()> {
+        let mut guard = self.inner.try_borrow_mut().map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "RefCell borrow error: {}",
+                e
+            ))
+        })?;
+        *guard = None; // take and drop the wry::WebView
+        Ok(())
     }
 
     // ── Misc ───────────────────────────────────────────────────────────────
 
-    fn print(&self) {
-        if let Ok(guard) = self.inner.lock() {
-            if let Some(ref wv) = *guard {
-                let _ = wv.print();
-            }
-        }
+    fn print(&self) -> PyResult<()> {
+        let guard = self.inner.try_borrow().map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "RefCell borrow error: {}",
+                e
+            ))
+        })?;
+        let wv = guard.as_ref().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("WebView is already closed")
+        })?;
+        wv.print()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))
     }
 
-    fn clear_all_browsing_data(&self) {
-        if let Ok(guard) = self.inner.lock() {
-            if let Some(ref wv) = *guard {
-                let _ = wv.clear_all_browsing_data();
-            }
-        }
+    fn clear_all_browsing_data(&self) -> PyResult<()> {
+        let guard = self.inner.try_borrow().map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "RefCell borrow error: {}",
+                e
+            ))
+        })?;
+        let wv = guard.as_ref().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("WebView is already closed")
+        })?;
+        wv.clear_all_browsing_data()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))
     }
 }
 
 // ── Enums ──────────────────────────────────────────────────────────────────
 
-#[pyclass(eq, frozen, skip_from_py_object)]
-#[derive(Clone, PartialEq)]
+#[pyclass(eq, frozen, hash, from_py_object)]
+#[derive(Clone, PartialEq, Hash)]
+enum WindowHandleKind {
+    /// Windows HWND
+    Win32,
+    /// macOS NSView pointer
+    AppKit,
+    /// Linux X11 XID (default on Linux)
+    X11,
+    /// Linux GTK container pointer (recommended for Wayland compatibility)
+    Gtk,
+}
+
+#[pyclass(eq, frozen, hash, skip_from_py_object)]
+#[derive(Clone, PartialEq, Hash)]
 enum PageLoadEvent {
     Started,
     Finished,
 }
 
-#[pyclass(eq, frozen, from_py_object)]
-#[derive(Clone, PartialEq)]
+#[pyclass(eq, frozen, hash, from_py_object)]
+#[derive(Clone, PartialEq, Hash)]
 enum NewWindowResponse {
     Allow,
     Deny,
 }
 
-#[pyclass(eq, frozen, skip_from_py_object)]
-#[derive(Clone, PartialEq)]
+#[pyclass(eq, frozen, hash, skip_from_py_object)]
+#[derive(Clone, PartialEq, Hash)]
 enum DragDropEvent {
     Enter,
     Over,
@@ -957,6 +1232,7 @@ fn ensure_gtk_init() {
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<WebView>()?;
     m.add_class::<CookieDict>()?;
+    m.add_class::<WindowHandleKind>()?;
     m.add_class::<PageLoadEvent>()?;
     m.add_class::<NewWindowResponse>()?;
     m.add_class::<DragDropEvent>()?;

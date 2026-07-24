@@ -4,22 +4,44 @@ from typing import Callable, Optional, Union
 from enum import Enum
 
 
+class WindowHandleKind(Enum):
+    """Native window handle type passed via ``parent_hwnd``.
+    """
+    Win32 = ...
+    """Windows HWND (default on Windows)"""
+    AppKit = ...
+    """macOS NSView pointer (default on macOS)"""
+    X11 = ...
+    """Linux X11 XID (default on Linux)"""
+    Gtk = ...
+    """Linux GTK container pointer (works on both X11 and Wayland)"""
+
+
 class PageLoadEvent(Enum):
-    Started = 0
-    Finished = 1
+    Started = ...
+    """Indicates that the content of the page has started loading"""
+    Finished = ...
+    """Indicates that the page content has finished loading"""
 
 
 class NewWindowResponse(Enum):
-    Allow = 0
-    Deny = 1
+    Allow = ...
+    """Allow the window to be opened with the default implementation"""
+    Deny = ...
+    """Deny the window from being opened"""
 
 
 class DragDropEvent(Enum):
-    Enter = 0
-    Over = 1
-    Drop = 2
-    Leave = 3
-    Unknown = 4
+    Enter = ...
+    """A drag operation has entered the webview"""
+    Over = ...
+    """A drag operation is moving over the window"""
+    Drop = ...
+    """The file(s) have been dropped onto the window"""
+    Leave = ...
+    """The drag operation has been cancelled or left the window"""
+    Unknown = ...
+    """Catch-all for future event types (``DragDropEvent`` is non-exhaustive)"""
 
 
 class CookieDict:
@@ -96,6 +118,7 @@ class WebView:
             on_download_started: Optional[Callable[[str, str], Union[bool, str]]] = None,
             on_download_completed: Optional[Callable[[str, Optional[str], bool], None]] = None,
             as_child: bool = True,
+            parent_hwnd_kind: Optional[WindowHandleKind] = None,
     ) -> None:
         """Create a WebView.
 
@@ -126,14 +149,11 @@ class WebView:
                 ``window.ipc.postMessage()`` on the JS side.
             on_navigation: Callable ``(url: str) -> bool`` — return ``False`` to
                 block navigation.
-            on_page_load: Callable ``(event: str, url: str)`` — *event* is
-                ``"Started"`` or ``"Finished"``.
+            on_page_load: Callable ``(event: PageLoadEvent, url: str)``.
             on_title_changed: Callable ``(title: str)`` — fires when
                 ``document.title`` changes.
-            on_new_window: Callable ``(url: str) -> str`` — return ``"allow"`` or
-                ``"deny"``.
-            drag_drop_handler: Callable ``(event_type, paths, position) -> bool``.
-                *event_type* is one of ``"Enter"``, ``"Over"``, ``"Drop"``, ``"Leave"``.
+            on_new_window: Callable ``(url: str) -> NewWindowResponse``.
+            drag_drop_handler: Callable ``(event: DragDropEvent, paths, position) -> bool``.
             custom_protocols: Dict mapping scheme names to async handlers.
                 Handler signature: ``(method, uri, headers, body, respond)``.
                 Call ``respond(status, headers, body)`` to reply (any thread OK).
@@ -161,6 +181,10 @@ class WebView:
                 inside *parent_hwnd* — you manage size via :meth:`set_bounds`.
                 If ``False``, the WebView **fills** *parent_hwnd* and auto-resizes
                 when the parent resizes — no :meth:`set_bounds` needed.
+            parent_hwnd_kind: Optional :class:`WindowHandleKind`.  Auto-detected
+                per platform (Win32 / AppKit / X11).  On Linux, set to
+                ``WindowHandleKind.Gtk`` to embed in a GTK container
+                (recommended — works on both X11 and Wayland).
         """
 
     # ── Content ────────────────────────────────────────────────────────────
@@ -187,7 +211,8 @@ class WebView:
         :meth:`eval_js_with_callback` if you need the result."""
 
     def eval_js_with_callback(self, script: str, callback: Callable[[str], None]) -> None:
-        """Execute JavaScript and pass the JSON-serialised result to *callback*."""
+        """Execute JavaScript and pass the raw string result to *callback*.
+        Use ``json.loads()`` in your callback if you need a Python dict/list."""
 
     # ── IPC ────────────────────────────────────────────────────────────────
 
@@ -231,8 +256,9 @@ class WebView:
         macOS: *new_parent* **must** be an ``NSWindow`` pointer, not an
         ``NSView``.  Passing an NSView will crash.  You almost never need
         this on macOS — native views aren't destroyed on hide/show.
-        Linux: no-op — needs a GTK container, not an XID.  X11 doesn't
-        destroy windows on hide/show either.
+        Linux: raises ``NotImplementedError`` — wry needs a GTK container,
+        not a raw XID.  Use :class:`WindowHandleKind.Gtk` at construction
+        time to create a GTK-embedded WebView instead of reparenting later.
         """
 
     # ── Geometry / Visibility ──────────────────────────────────────────────
@@ -282,6 +308,19 @@ class WebView:
 
     def delete_cookie(self, name: str, url: str) -> None:
         """Delete a cookie by name, scoped to *url*."""
+
+    # ── Lifecycle ──────────────────────────────────────────────────────────
+
+    def close(self) -> None:
+        """Explicitly destroy the native WebView.
+
+        Drops the underlying ``wry::WebView``, running WebView2 / WKWebView
+        cleanup (including window class unregistration on Windows) while the
+        parent window is still alive.
+
+        Call this before program exit to avoid harmless but noisy errors like
+        "Failed to unregister class Chrome_WidgetWin_0" from deferred cleanup.
+        """
 
     # ── Misc ───────────────────────────────────────────────────────────────
 
