@@ -9,6 +9,7 @@ use pyo3::prelude::*;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::num::NonZero;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 // ── Helper: convert wry Rect to/from simple values ─────────────────────────
@@ -92,6 +93,51 @@ fn build_window_handle(
     }
 }
 
+// ── SharedWebContext: holds either an owned or Rc-shared wry::WebContext ──
+
+#[allow(dead_code)]
+enum SharedWebContext {
+    Owned(wry::WebContext),
+    Shared(Rc<RefCell<wry::WebContext>>),
+}
+
+// ── WebContext: Python-facing shared browser context ──────────────────────
+
+/// Sharable WebContext for persistent state (cookies, cache, storage).
+///
+/// Create once and pass to multiple [`WebView`] instances to share
+/// browsing data — cookies set in one WebView are visible in another.
+///
+/// ```python
+/// ctx = wryview.WebContext(data_directory="/path/to/profile")
+/// wv1 = WebView(hwnd1, web_context=ctx, ...)
+/// wv2 = WebView(hwnd2, web_context=ctx, ...)  # shares cookies/cache
+/// ```
+#[pyclass(unsendable)]
+struct WebContext {
+    inner: Rc<RefCell<wry::WebContext>>,
+}
+
+#[pymethods]
+impl WebContext {
+    #[new]
+    #[pyo3(signature = (data_directory = None))]
+    fn new(data_directory: Option<String>) -> Self {
+        let ctx = wry::WebContext::new(data_directory.map(std::path::PathBuf::from));
+        WebContext {
+            inner: Rc::new(RefCell::new(ctx)),
+        }
+    }
+
+    #[getter]
+    fn data_directory(&self) -> Option<String> {
+        self.inner
+            .borrow()
+            .data_directory()
+            .map(|p| p.to_string_lossy().to_string())
+    }
+}
+
 // ── The Python class ───────────────────────────────────────────────────────
 
 #[pyclass(unsendable)]
@@ -100,7 +146,7 @@ struct WebView {
     // so RefCell is the appropriate interior-mutability primitive here.
     inner: RefCell<Option<wry::WebView>>,
     callbacks: Arc<Callbacks>,
-    _web_context: Option<wry::WebContext>,
+    _web_context: Option<SharedWebContext>,
 }
 
 #[pymethods]
@@ -139,6 +185,7 @@ impl WebView {
         https_scheme = false,
         default_context_menus = true,
         data_directory = None,
+        web_context = None,
         headers = None,
         on_download_started = None,
         on_download_completed = None,
@@ -176,6 +223,7 @@ impl WebView {
         https_scheme: bool,
         default_context_menus: bool,
         data_directory: Option<String>,
+        web_context: Option<pyo3::Py<WebContext>>,
         headers: Option<pyo3::Py<pyo3::PyAny>>,
         on_download_started: Option<pyo3::Py<pyo3::PyAny>>,
         on_download_completed: Option<pyo3::Py<pyo3::PyAny>>,
@@ -378,250 +426,279 @@ impl WebView {
                 })
             };
 
-        // ── Build wry WebViewBuilder ────────────────────────────────────
-        let mut web_context =
-            data_directory.map(|d| wry::WebContext::new(Some(std::path::PathBuf::from(d))));
-        let mut builder = if let Some(ref mut ctx) = web_context {
-            wry::WebViewBuilder::new_with_web_context(ctx)
+        // ── Determine WebContext (shared > owned > none) ──────────────
+        // Extract Rc from a Python WebContext, or create an owned one
+        // from data_directory.  web_context takes priority.
+        let shared_rc: Option<Rc<RefCell<wry::WebContext>>> = web_context
+            .as_ref()
+            .map(|py_ctx| py_ctx.borrow(py).inner.clone());
+
+        let mut owned_ctx: Option<wry::WebContext> = if shared_rc.is_none() {
+            data_directory.map(|d| wry::WebContext::new(Some(std::path::PathBuf::from(d))))
         } else {
-            wry::WebViewBuilder::new()
-        };
-        builder = builder
-            .with_bounds(rect_from_bounds(0.0, 0.0, width as f64, height as f64))
-            .with_transparent(transparent)
-            .with_visible(visible)
-            .with_devtools(devtools)
-            .with_incognito(incognito)
-            .with_focused(focused)
-            .with_autoplay(autoplay)
-            .with_hotkeys_zoom(hotkeys_zoom)
-            .with_back_forward_navigation_gestures(back_forward_gestures)
-            .with_clipboard(clipboard)
-            .with_ipc_handler(ipc_handler_wry)
-            .with_navigation_handler(nav_handler)
-            .with_on_page_load_handler(pageload_handler)
-            .with_document_title_changed_handler(title_handler)
-            .with_new_window_req_handler(newwin_handler)
-            .with_drag_drop_handler(drag_drop_handler)
-            .with_download_started_handler(download_started_handler)
-            .with_download_completed_handler(download_completed_handler);
-
-        // ── Custom protocols ────────────────────────────────────────────
-        let protocol_handlers: Vec<(String, pyo3::Py<pyo3::PyAny>)> = {
-            let guard = protocols.lock().unwrap();
-            guard
-                .iter()
-                .map(|(name, h)| (name.clone(), h.clone_ref(py)))
-                .collect()
+            None
         };
 
-        for (name, handler) in protocol_handlers {
-            let handler_arc = Arc::new(handler);
-            builder = builder.with_asynchronous_custom_protocol(
-                name,
-                move |_id: wry::WebViewId,
-                      request: wry::http::Request<Vec<u8>>,
-                      responder: wry::RequestAsyncResponder| {
-                    let h = Arc::clone(&handler_arc);
-                    Python::attach(|py| {
-                        let handler = h.as_ref().clone_ref(py);
-                        let method = request.method().to_string();
-                        let uri = request.uri().to_string();
-                        let mut headers: Vec<(String, String)> = Vec::new();
-                        for (k, v) in request.headers().iter() {
-                            headers.push((
-                                k.as_str().to_string(),
-                                v.to_str().unwrap_or("").to_string(),
-                            ));
-                        }
-                        let body = request.body().clone();
+        // ── Build wry WebViewBuilder ────────────────────────────────────
+        // We wrap the entire builder section in a block so shared_guard /
+        // builder borrows are released before we move shared_rc / owned_ctx
+        // into the return value below.
+        let webview = {
+            let mut shared_guard;
+            let mut builder;
+            if let Some(ref rc) = shared_rc {
+                shared_guard = rc.borrow_mut();
+                builder = wry::WebViewBuilder::new_with_web_context(&mut *shared_guard);
+            } else if let Some(ref mut ctx) = owned_ctx {
+                builder = wry::WebViewBuilder::new_with_web_context(ctx);
+            } else {
+                builder = wry::WebViewBuilder::new();
+            }
+            builder = builder
+                .with_bounds(rect_from_bounds(0.0, 0.0, width as f64, height as f64))
+                .with_transparent(transparent)
+                .with_visible(visible)
+                .with_devtools(devtools)
+                .with_incognito(incognito)
+                .with_focused(focused)
+                .with_autoplay(autoplay)
+                .with_hotkeys_zoom(hotkeys_zoom)
+                .with_back_forward_navigation_gestures(back_forward_gestures)
+                .with_clipboard(clipboard)
+                .with_ipc_handler(ipc_handler_wry)
+                .with_navigation_handler(nav_handler)
+                .with_on_page_load_handler(pageload_handler)
+                .with_document_title_changed_handler(title_handler)
+                .with_new_window_req_handler(newwin_handler)
+                .with_drag_drop_handler(drag_drop_handler)
+                .with_download_started_handler(download_started_handler)
+                .with_download_completed_handler(download_completed_handler);
 
-                        // Wrap responder as a Python callable.
-                        let cell = Arc::new(Mutex::new(Some(responder)));
-                        let respond = pyo3::types::PyCFunction::new_closure(
-                            py,
-                            None,
-                            None,
-                            move |args: &pyo3::Bound<'_, pyo3::types::PyTuple>,
-                                _kwargs: Option<
-                                    &pyo3::Bound<'_, pyo3::types::PyDict>,
-                                >| {
-                                if let Ok(mut r_opt) = cell.lock() {
-                                    if let Some(r) = r_opt.take() {
-                                        let status: u16 = args
-                                            .get_item(0)
-                                            .ok()
-                                            .and_then(|v| v.extract::<u16>().ok())
-                                            .unwrap_or(500);
-                                        let resp_headers: Vec<(String, String)> = args
-                                            .get_item(1)
-                                            .ok()
-                                            .and_then(|v| v.extract().ok())
-                                            .unwrap_or_default();
-                                        let resp_body: Vec<u8> = args
-                                            .get_item(2)
-                                            .ok()
-                                            .and_then(|v| v.extract().ok())
-                                            .unwrap_or_default();
-                                        let mut builder =
-                                            wry::http::Response::builder().status(status);
-                                        for (k, v) in &resp_headers {
-                                            builder = builder.header(k.as_str(), v.as_str());
+            // ── Custom protocols ────────────────────────────────────────────
+            let protocol_handlers: Vec<(String, pyo3::Py<pyo3::PyAny>)> = {
+                let guard = protocols.lock().unwrap();
+                guard
+                    .iter()
+                    .map(|(name, h)| (name.clone(), h.clone_ref(py)))
+                    .collect()
+            };
+
+            for (name, handler) in protocol_handlers {
+                let handler_arc = Arc::new(handler);
+                builder = builder.with_asynchronous_custom_protocol(
+                    name,
+                    move |_id: wry::WebViewId,
+                          request: wry::http::Request<Vec<u8>>,
+                          responder: wry::RequestAsyncResponder| {
+                        let h = Arc::clone(&handler_arc);
+                        Python::attach(|py| {
+                            let handler = h.as_ref().clone_ref(py);
+                            let method = request.method().to_string();
+                            let uri = request.uri().to_string();
+                            let mut headers: Vec<(String, String)> = Vec::new();
+                            for (k, v) in request.headers().iter() {
+                                headers.push((
+                                    k.as_str().to_string(),
+                                    v.to_str().unwrap_or("").to_string(),
+                                ));
+                            }
+                            let body = request.body().clone();
+
+                            // Wrap responder as a Python callable.
+                            let cell = Arc::new(Mutex::new(Some(responder)));
+                            let respond =
+                                pyo3::types::PyCFunction::new_closure(
+                                    py,
+                                    None,
+                                    None,
+                                    move |args: &pyo3::Bound<'_, pyo3::types::PyTuple>,
+                                          _kwargs: Option<
+                                        &pyo3::Bound<'_, pyo3::types::PyDict>,
+                                    >| {
+                                        if let Ok(mut r_opt) = cell.lock() {
+                                            if let Some(r) = r_opt.take() {
+                                                let status: u16 = args
+                                                    .get_item(0)
+                                                    .ok()
+                                                    .and_then(|v| v.extract::<u16>().ok())
+                                                    .unwrap_or(500);
+                                                let resp_headers: Vec<(String, String)> = args
+                                                    .get_item(1)
+                                                    .ok()
+                                                    .and_then(|v| v.extract().ok())
+                                                    .unwrap_or_default();
+                                                let resp_body: Vec<u8> = args
+                                                    .get_item(2)
+                                                    .ok()
+                                                    .and_then(|v| v.extract().ok())
+                                                    .unwrap_or_default();
+                                                let mut builder =
+                                                    wry::http::Response::builder().status(status);
+                                                for (k, v) in &resp_headers {
+                                                    builder =
+                                                        builder.header(k.as_str(), v.as_str());
+                                                }
+                                                let response = builder
+                                                    .body(std::borrow::Cow::Owned(resp_body))
+                                                    .unwrap();
+                                                drop(r_opt);
+                                                let py = args.py();
+                                                py.detach(move || {
+                                                    let _ = r.respond(response);
+                                                });
+                                            }
                                         }
-                                        let response = builder
-                                            .body(std::borrow::Cow::Owned(resp_body))
-                                            .unwrap();
-                                        drop(r_opt);
-                                        let py = args.py();
-                                        py.detach(move || {
-                                            let _ = r.respond(response);
-                                        });
-                                    }
-                                }
-                                Ok::<_, pyo3::PyErr>(args.py().None())
-                            },
-                        )
-                        .unwrap();
+                                        Ok::<_, pyo3::PyErr>(args.py().None())
+                                    },
+                                )
+                                .unwrap();
 
-                        if let Err(e) =
-                            handler.call(py, (method, uri, headers, body, respond), None)
-                        {
-                            e.write_unraisable(py, None);
-                        }
-                    })
-                },
-            );
-        }
-
-        // ── Proxy ───────────────────────────────────────────────────────
-        if let Some(ref p) = proxy {
-            use wry::ProxyConfig;
-            let ep = wry::ProxyEndpoint {
-                host: p.get("host").cloned().unwrap_or_default(),
-                port: p.get("port").cloned().unwrap_or_default(),
-            };
-            let cfg = match p.get("type").map(|s| s.as_str()) {
-                Some("socks5") => ProxyConfig::Socks5(ep),
-                _ => ProxyConfig::Http(ep),
-            };
-            builder = builder.with_proxy_config(cfg);
-        }
-
-        // ── Remaining builder options ───────────────────────────────────
-        if !javascript_enabled {
-            builder = builder.with_javascript_disabled();
-        }
-        // https_scheme: custom protocol uses https:// prefix → secure context.
-        // Windows (WebView2) only — WebView2 converts custom schemes to
-        // http://{name}.{path} by default; https_scheme makes it https://.
-        // macOS / Linux use native <scheme>://{path} and don't need this.
-        if https_scheme {
-            #[cfg(target_os = "windows")]
-            {
-                use wry::WebViewBuilderExtWindows;
-                builder = builder.with_https_scheme(true);
+                            if let Err(e) =
+                                handler.call(py, (method, uri, headers, body, respond), None)
+                            {
+                                e.write_unraisable(py, None);
+                            }
+                        })
+                    },
+                );
             }
-            // non-Windows: silently ignored (already native scheme, no workaround)
-        }
-        // default_context_menus: Windows only — enable/disable native right-click menu.
-        if !default_context_menus {
-            #[cfg(target_os = "windows")]
-            {
-                use wry::WebViewBuilderExtWindows;
-                builder = builder.with_default_context_menus(false);
+
+            // ── Proxy ───────────────────────────────────────────────────────
+            if let Some(ref p) = proxy {
+                use wry::ProxyConfig;
+                let ep = wry::ProxyEndpoint {
+                    host: p.get("host").cloned().unwrap_or_default(),
+                    port: p.get("port").cloned().unwrap_or_default(),
+                };
+                let cfg = match p.get("type").map(|s| s.as_str()) {
+                    Some("socks5") => ProxyConfig::Socks5(ep),
+                    _ => ProxyConfig::Http(ep),
+                };
+                builder = builder.with_proxy_config(cfg);
             }
-        }
-        if let Some(bg) = background_color {
-            builder = builder.with_background_color(bg);
-        }
-        if let Some(ref ua) = user_agent {
-            builder = builder.with_user_agent(ua);
-        }
-        // url must come before headers: with_url clears headers internally
-        if let Some(ref u) = url {
-            builder = builder.with_url(u);
-        }
-        if let Some(ref h) = headers {
-            let bound = h.bind(py);
-            let pairs: Vec<(String, String)> = bound
-                .extract::<Vec<(String, String)>>()
-                .ok()
-                .or_else(|| {
-                    let dict: HashMap<String, String> = bound.extract().ok()?;
-                    Some(dict.into_iter().collect())
-                })
-                .unwrap_or_default();
-            let mut header_map = wry::http::HeaderMap::new();
-            for (k, v) in pairs {
-                if let (Ok(name), Ok(value)) = (
-                    wry::http::header::HeaderName::from_bytes(k.as_bytes()),
-                    wry::http::header::HeaderValue::from_str(&v),
-                ) {
-                    header_map.insert(name, value);
+
+            // ── Remaining builder options ───────────────────────────────────
+            if !javascript_enabled {
+                builder = builder.with_javascript_disabled();
+            }
+            // https_scheme: custom protocol uses https:// prefix → secure context.
+            // Windows (WebView2) only — WebView2 converts custom schemes to
+            // http://{name}.{path} by default; https_scheme makes it https://.
+            // macOS / Linux use native <scheme>://{path} and don't need this.
+            if https_scheme {
+                #[cfg(target_os = "windows")]
+                {
+                    use wry::WebViewBuilderExtWindows;
+                    builder = builder.with_https_scheme(true);
+                }
+                // non-Windows: silently ignored (already native scheme, no workaround)
+            }
+            // default_context_menus: Windows only — enable/disable native right-click menu.
+            if !default_context_menus {
+                #[cfg(target_os = "windows")]
+                {
+                    use wry::WebViewBuilderExtWindows;
+                    builder = builder.with_default_context_menus(false);
                 }
             }
-            builder = builder.with_headers(header_map);
-        }
-        if let Some(ref script) = initialization_script {
-            builder = builder.with_initialization_script(script);
-        }
-        if let Some(ref h) = html {
-            builder = builder.with_html(h);
-        }
+            if let Some(bg) = background_color {
+                builder = builder.with_background_color(bg);
+            }
+            if let Some(ref ua) = user_agent {
+                builder = builder.with_user_agent(ua);
+            }
+            // url must come before headers: with_url clears headers internally
+            if let Some(ref u) = url {
+                builder = builder.with_url(u);
+            }
+            if let Some(ref h) = headers {
+                let bound = h.bind(py);
+                let pairs: Vec<(String, String)> = bound
+                    .extract::<Vec<(String, String)>>()
+                    .ok()
+                    .or_else(|| {
+                        let dict: HashMap<String, String> = bound.extract().ok()?;
+                        Some(dict.into_iter().collect())
+                    })
+                    .unwrap_or_default();
+                let mut header_map = wry::http::HeaderMap::new();
+                for (k, v) in pairs {
+                    if let (Ok(name), Ok(value)) = (
+                        wry::http::header::HeaderName::from_bytes(k.as_bytes()),
+                        wry::http::header::HeaderValue::from_str(&v),
+                    ) {
+                        header_map.insert(name, value);
+                    }
+                }
+                builder = builder.with_headers(header_map);
+            }
+            if let Some(ref script) = initialization_script {
+                builder = builder.with_initialization_script(script);
+            }
+            if let Some(ref h) = html {
+                builder = builder.with_html(h);
+            }
 
-        // ── GTK init (Linux only, idempotent) ──────────────────────────
-        #[cfg(all(unix, not(target_os = "macos")))]
-        {
-            match gtk::init() {
-                Ok(()) => { /* GTK initialized */ }
-                Err(ref e) => {
-                    // "already initialized" is harmless — gtk::init() is idempotent
-                    if !gtk::is_initialized() {
-                        return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                            "GTK init failed: {}. Is $DISPLAY set?",
-                            e
-                        )));
+            // ── GTK init (Linux only, idempotent) ──────────────────────────
+            #[cfg(all(unix, not(target_os = "macos")))]
+            {
+                match gtk::init() {
+                    Ok(()) => { /* GTK initialized */ }
+                    Err(ref e) => {
+                        // "already initialized" is harmless — gtk::init() is idempotent
+                        if !gtk::is_initialized() {
+                            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                                format!("GTK init failed: {}. Is $DISPLAY set?", e),
+                            ));
+                        }
                     }
                 }
             }
-        }
 
-        // ── Build the webview ──────────────────────────────────────────
-        let webview = {
-            #[cfg(all(unix, not(target_os = "macos")))]
-            if parent_hwnd_kind == Some(&WindowHandleKind::Gtk) {
-                // GTK path — embeds directly in a GTK container.
-                // Works on both X11 and Wayland via GTK's backend abstraction.
-                use gtk::prelude::IsA;
-                let container =
-                    unsafe { gtk::Container::from_glib_none(parent_hwnd as *mut _) };
-                builder.build_gtk(&container)
-            } else {
-                let window_handle =
-                    build_window_handle(parent_hwnd, parent_hwnd_kind.as_ref())?;
-                if as_child {
-                    builder.build_as_child(&window_handle)
-                } else {
-                    builder.build(&window_handle)
-                }
-            }
-            #[cfg(not(all(unix, not(target_os = "macos"))))]
+            // ── Build the webview (inner block returns the Result) ──────────
             {
-                let window_handle =
-                    build_window_handle(parent_hwnd, parent_hwnd_kind.as_ref())?;
-                if as_child {
-                    builder.build_as_child(&window_handle)
+                #[cfg(all(unix, not(target_os = "macos")))]
+                if parent_hwnd_kind == Some(&WindowHandleKind::Gtk) {
+                    // GTK path — embeds directly in a GTK container.
+                    // Works on both X11 and Wayland via GTK's backend abstraction.
+                    use gtk::prelude::IsA;
+                    let container =
+                        unsafe { gtk::Container::from_glib_none(parent_hwnd as *mut _) };
+                    builder.build_gtk(&container)
                 } else {
-                    builder.build(&window_handle)
+                    let window_handle =
+                        build_window_handle(parent_hwnd, parent_hwnd_kind.as_ref())?;
+                    if as_child {
+                        builder.build_as_child(&window_handle)
+                    } else {
+                        builder.build(&window_handle)
+                    }
+                }
+                #[cfg(not(all(unix, not(target_os = "macos"))))]
+                {
+                    let window_handle =
+                        build_window_handle(parent_hwnd, parent_hwnd_kind.as_ref())?;
+                    if as_child {
+                        builder.build_as_child(&window_handle)
+                    } else {
+                        builder.build(&window_handle)
+                    }
                 }
             }
-        }
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?
+        }; // block end — shared_guard, builder (and their borrows) dropped here
+
+        // ── Store the context (keeps it alive as long as the WebView) ─
+        let stored_ctx = match (shared_rc, owned_ctx) {
+            (Some(rc), _) => Some(SharedWebContext::Shared(rc)),
+            (None, Some(ctx)) => Some(SharedWebContext::Owned(ctx)),
+            (None, None) => None,
+        };
 
         Ok(Self {
             inner: RefCell::new(Some(webview)),
             callbacks,
-            _web_context: web_context,
+            _web_context: stored_ctx,
         })
     }
 
@@ -1230,6 +1307,7 @@ fn ensure_gtk_init() {
 
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<WebContext>()?;
     m.add_class::<WebView>()?;
     m.add_class::<CookieDict>()?;
     m.add_class::<WindowHandleKind>()?;

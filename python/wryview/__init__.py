@@ -2,7 +2,7 @@
 wryview — Minimal wry webview binding for Python.
 
 Usage:
-    from wryview import WebView, CookieDict
+    from wryview import WebView, CookieDict, WebContext
 
     # Embed as child window (default)
     wv = WebView(int(widget.winId()))
@@ -24,16 +24,34 @@ Usage:
     cookies = wv.cookies()
     for c in cookies:
         print(f"{c.name} = {c.value}")
+
+    # Shared WebContext (cookies/cache shared across WebViews)
+    ctx = WebContext(data_directory="/path/to/profile")
+    wv1 = WebView(hwnd1, web_context=ctx)
+    wv2 = WebView(hwnd2, web_context=ctx)  # shares cookies/cache
 """
 
 from wryview._core import (
-    WebView, CookieDict, PageLoadEvent, NewWindowResponse, DragDropEvent,
-    pump_events, ensure_gtk_init, WindowHandleKind
+    WebView,
+    WebContext,
+    CookieDict,
+    PageLoadEvent,
+    NewWindowResponse,
+    DragDropEvent,
+    pump_events,
+    ensure_gtk_init,
+    WindowHandleKind,
 )
 
 __version__ = "0.4.0"
 __all__ = [
-    "WebView", "CookieDict",
-    "PageLoadEvent", "NewWindowResponse", "DragDropEvent",
-    "pump_events", "ensure_gtk_init", "WindowHandleKind"
+    "WebView",
+    "WebContext",
+    "CookieDict",
+    "PageLoadEvent",
+    "NewWindowResponse",
+    "DragDropEvent",
+    "pump_events",
+    "ensure_gtk_init",
+    "WindowHandleKind",
 ]

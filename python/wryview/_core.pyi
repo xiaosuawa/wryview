@@ -3,10 +3,9 @@
 from typing import Callable, Optional, Union
 from enum import Enum
 
-
 class WindowHandleKind(Enum):
-    """Native window handle type passed via ``parent_hwnd``.
-    """
+    """Native window handle type passed via ``parent_hwnd``."""
+
     Win32 = ...
     """Windows HWND (default on Windows)"""
     AppKit = ...
@@ -16,20 +15,17 @@ class WindowHandleKind(Enum):
     Gtk = ...
     """Linux GTK container pointer (works on both X11 and Wayland)"""
 
-
 class PageLoadEvent(Enum):
     Started = ...
     """Indicates that the content of the page has started loading"""
     Finished = ...
     """Indicates that the page content has finished loading"""
 
-
 class NewWindowResponse(Enum):
     Allow = ...
     """Allow the window to be opened with the default implementation"""
     Deny = ...
     """Deny the window from being opened"""
-
 
 class DragDropEvent(Enum):
     Enter = ...
@@ -43,6 +39,31 @@ class DragDropEvent(Enum):
     Unknown = ...
     """Catch-all for future event types (``DragDropEvent`` is non-exhaustive)"""
 
+class WebContext:
+    """Sharable browser context for persistent state (cookies, cache, storage).
+
+    Create once and pass to multiple :class:`WebView` instances to share
+    browsing data — cookies set in one WebView are visible in another.
+
+    Usage::
+
+        ctx = wryview.WebContext(data_directory="/path/to/profile")
+        wv1 = WebView(hwnd1, web_context=ctx, ...)
+        wv2 = WebView(hwnd2, web_context=ctx, ...)  # shares cookies/cache
+    """
+
+    def __init__(self, data_directory: Optional[str] = None) -> None:
+        """Create a sharable WebContext.
+
+        Args:
+            data_directory: Path for persistent user data (cache, cookies,
+                localStorage, etc.).  Creates the directory if it does not
+                exist.  Pass ``None`` for an ephemeral (in-memory) context.
+        """
+
+    @property
+    def data_directory(self) -> Optional[str]:
+        """Return the data directory path, or ``None`` for ephemeral."""
 
 class CookieDict:
     """A single cookie returned by :meth:`WebView.cookies`."""
@@ -71,7 +92,6 @@ class CookieDict:
     def http_only(self) -> bool:
         """Whether the cookie is inaccessible to JavaScript."""
 
-
 class WebView:
     """Cross-platform webview backed by the system WebView engine.
 
@@ -80,45 +100,61 @@ class WebView:
     """
 
     def __init__(
-            self,
-            parent_hwnd: int,
-            *,
-            width: int = 800,
-            height: int = 600,
-            url: Optional[str] = None,
-            html: Optional[str] = None,
-            transparent: bool = False,
-            background_color: Optional[tuple[int, int, int, int]] = None,
-            visible: bool = True,
-            devtools: bool = False,
-            incognito: bool = False,
-            user_agent: Optional[str] = None,
-            focused: bool = True,
-            autoplay: bool = False,
-            javascript_enabled: bool = True,
-            hotkeys_zoom: bool = True,
-            initialization_script: Optional[str] = None,
-            ipc_handler: Optional[Callable[[str], None]] = None,
-            on_navigation: Optional[Callable[[str], bool]] = None,
-            on_page_load: Optional[Callable[[PageLoadEvent, str], None]] = None,
-            on_title_changed: Optional[Callable[[str], None]] = None,
-            on_new_window: Optional[Callable[[str], Union[NewWindowResponse, str]]] = None,
-            drag_drop_handler: Optional[Callable[[DragDropEvent, list[str], tuple[int, int]], bool]] = None,
-            custom_protocols: Optional[
-                dict[str, Callable[[str, str, list[tuple[str, str]], bytes,
-                                    Callable[[int, list[tuple[str, str]], bytes], None]], None]]
-            ] = None,
-            proxy: Optional[dict[str, str]] = None,
-            back_forward_gestures: bool = False,
-            clipboard: bool = True,
-            data_directory: Optional[str] = None,
-            headers: Optional[Union[dict[str, str], list[tuple[str, str]]]] = None,
-            https_scheme: bool = False,
-            default_context_menus: bool = True,
-            on_download_started: Optional[Callable[[str, str], Union[bool, str]]] = None,
-            on_download_completed: Optional[Callable[[str, Optional[str], bool], None]] = None,
-            as_child: bool = True,
-            parent_hwnd_kind: Optional[WindowHandleKind] = None,
+        self,
+        parent_hwnd: int,
+        *,
+        width: int = 800,
+        height: int = 600,
+        url: Optional[str] = None,
+        html: Optional[str] = None,
+        transparent: bool = False,
+        background_color: Optional[tuple[int, int, int, int]] = None,
+        visible: bool = True,
+        devtools: bool = False,
+        incognito: bool = False,
+        user_agent: Optional[str] = None,
+        focused: bool = True,
+        autoplay: bool = False,
+        javascript_enabled: bool = True,
+        hotkeys_zoom: bool = True,
+        initialization_script: Optional[str] = None,
+        ipc_handler: Optional[Callable[[str], None]] = None,
+        on_navigation: Optional[Callable[[str], bool]] = None,
+        on_page_load: Optional[Callable[[PageLoadEvent, str], None]] = None,
+        on_title_changed: Optional[Callable[[str], None]] = None,
+        on_new_window: Optional[Callable[[str], Union[NewWindowResponse, str]]] = None,
+        drag_drop_handler: Optional[
+            Callable[[DragDropEvent, list[str], tuple[int, int]], bool]
+        ] = None,
+        custom_protocols: Optional[
+            dict[
+                str,
+                Callable[
+                    [
+                        str,
+                        str,
+                        list[tuple[str, str]],
+                        bytes,
+                        Callable[[int, list[tuple[str, str]], bytes], None],
+                    ],
+                    None,
+                ],
+            ]
+        ] = None,
+        proxy: Optional[dict[str, str]] = None,
+        back_forward_gestures: bool = False,
+        clipboard: bool = True,
+        data_directory: Optional[str] = None,
+        web_context: Optional[WebContext] = None,
+        headers: Optional[Union[dict[str, str], list[tuple[str, str]]]] = None,
+        https_scheme: bool = False,
+        default_context_menus: bool = True,
+        on_download_started: Optional[Callable[[str, str], Union[bool, str]]] = None,
+        on_download_completed: Optional[
+            Callable[[str, Optional[str], bool], None]
+        ] = None,
+        as_child: bool = True,
+        parent_hwnd_kind: Optional[WindowHandleKind] = None,
     ) -> None:
         """Create a WebView.
 
@@ -174,6 +210,10 @@ class WebView:
                 *saved_path* is ``None`` if the download was cancelled.
             data_directory: Path for persistent user data (cache, cookies, etc.).
                 Creates the directory if it doesn't exist.
+                Ignored when *web_context* is provided.
+            web_context: Optional :class:`WebContext` to share browsing data
+                (cookies, cache, storage) across multiple :class:`WebView`
+                instances.  Takes priority over *data_directory*.
             headers: Custom HTTP headers sent with every request.  Accepts
                 ``dict[str, str]`` or ``list[tuple[str, str]]`` (latter preserves
                 duplicate header names).
@@ -186,13 +226,14 @@ class WebView:
                 ``WindowHandleKind.Gtk`` to embed in a GTK container
                 (recommended — works on both X11 and Wayland).
         """
-
     # ── Content ────────────────────────────────────────────────────────────
 
     def load_url(self, url: str) -> None:
         """Navigate to *url*."""
 
-    def load_url_with_headers(self, url: str, headers: Union[dict[str, str], list[tuple[str, str]]]) -> None:
+    def load_url_with_headers(
+        self, url: str, headers: Union[dict[str, str], list[tuple[str, str]]]
+    ) -> None:
         """Navigate to *url* with custom HTTP headers."""
 
     def load_html(self, html: str) -> None:
@@ -203,17 +244,17 @@ class WebView:
 
     def url(self) -> Optional[str]:
         """Return the current URL, or ``None``."""
-
     # ── JavaScript ─────────────────────────────────────────────────────────
 
     def eval_js(self, script: str) -> None:
         """Execute JavaScript.  Return value is discarded; use
         :meth:`eval_js_with_callback` if you need the result."""
 
-    def eval_js_with_callback(self, script: str, callback: Callable[[str], None]) -> None:
+    def eval_js_with_callback(
+        self, script: str, callback: Callable[[str], None]
+    ) -> None:
         """Execute JavaScript and pass the raw string result to *callback*.
         Use ``json.loads()`` in your callback if you need a Python dict/list."""
-
     # ── IPC ────────────────────────────────────────────────────────────────
 
     def set_ipc_handler(self, handler: Callable[[str], None]) -> None:
@@ -221,7 +262,6 @@ class WebView:
 
     def clear_ipc_handler(self) -> None:
         """Remove the IPC message handler."""
-
     # ── Callback setters ───────────────────────────────────────────────────
 
     def set_on_navigation(self, handler: Callable[[str], bool]) -> None:
@@ -233,20 +273,27 @@ class WebView:
     def set_on_title_changed(self, handler: Callable[[str], None]) -> None:
         """Set title-changed handler."""
 
-    def set_on_new_window(self, handler: Callable[[str], Union[NewWindowResponse, str]]) -> None:
+    def set_on_new_window(
+        self, handler: Callable[[str], Union[NewWindowResponse, str]]
+    ) -> None:
         """Set new-window handler.  Return ``NewWindowResponse`` or ``"allow"/"deny"`` (backward compat)."""
 
-    def set_drag_drop_handler(self, handler: Callable[[DragDropEvent, list[str], tuple[int, int]], bool]) -> None:
+    def set_drag_drop_handler(
+        self, handler: Callable[[DragDropEvent, list[str], tuple[int, int]], bool]
+    ) -> None:
         """Set drag-drop handler.  Receives ``(event: DragDropEvent, paths, position)``."""
 
-    def set_on_download_started(self, handler: Callable[[str, str], Union[bool, str]]) -> None:
+    def set_on_download_started(
+        self, handler: Callable[[str, str], Union[bool, str]]
+    ) -> None:
         """Set download-started handler.  Receives ``(url, suggested_path)``.
         Return ``False`` to cancel, a new path string to redirect."""
 
-    def set_on_download_completed(self, handler: Callable[[str, Optional[str], bool], None]) -> None:
+    def set_on_download_completed(
+        self, handler: Callable[[str, Optional[str], bool], None]
+    ) -> None:
         """Set download-completed handler.  Receives ``(url, saved_path, success)``.
         *saved_path* is ``None`` if cancelled."""
-
     # ── Reparent ───────────────────────────────────────────────────────────
 
     def reparent(self, new_parent: int) -> None:
@@ -260,7 +307,6 @@ class WebView:
         not a raw XID.  Use :class:`WindowHandleKind.Gtk` at construction
         time to create a GTK-embedded WebView instead of reparenting later.
         """
-
     # ── Geometry / Visibility ──────────────────────────────────────────────
 
     def set_bounds(self, x: float, y: float, width: float, height: float) -> None:
@@ -278,12 +324,10 @@ class WebView:
 
     def focus(self) -> None:
         """Move keyboard focus to the webview."""
-
     # ── Zoom ───────────────────────────────────────────────────────────────
 
     def zoom(self, scale: float) -> None:
         """Set zoom level.  ``1.0`` = 100%, ``1.5`` = 150%."""
-
     # ── DevTools ───────────────────────────────────────────────────────────
 
     def open_devtools(self) -> None:
@@ -294,7 +338,6 @@ class WebView:
 
     def is_devtools_open(self) -> bool:
         """Return whether DevTools is currently open (macOS / Linux only)."""
-
     # ── Cookies ────────────────────────────────────────────────────────────
 
     def cookies(self) -> list[CookieDict]:
@@ -303,12 +346,17 @@ class WebView:
     def cookies_for_url(self, url: str) -> list[CookieDict]:
         """Return cookies visible to *url*."""
 
-    def set_cookie(self, name: str, value: str, domain: Optional[str] = None, path: Optional[str] = None) -> None:
+    def set_cookie(
+        self,
+        name: str,
+        value: str,
+        domain: Optional[str] = None,
+        path: Optional[str] = None,
+    ) -> None:
         """Set a cookie.  *domain* and *path* are optional."""
 
     def delete_cookie(self, name: str, url: str) -> None:
         """Delete a cookie by name, scoped to *url*."""
-
     # ── Lifecycle ──────────────────────────────────────────────────────────
 
     def close(self) -> None:
@@ -321,7 +369,6 @@ class WebView:
         Call this before program exit to avoid harmless but noisy errors like
         "Failed to unregister class Chrome_WidgetWin_0" from deferred cleanup.
         """
-
     # ── Misc ───────────────────────────────────────────────────────────────
 
     def print(self) -> None:
@@ -329,7 +376,6 @@ class WebView:
 
     def clear_all_browsing_data(self) -> None:
         """Clear all browsing data (cache, cookies, storage)."""
-
 
 # ── Module-level functions ────────────────────────────────────────────────
 
