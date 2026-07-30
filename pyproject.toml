@@ -48,5 +48,5 @@ Issues = "https://github.com/xiaosuawa/wryview/issues"
 [tool.maturin]
 python-source = "python"
 module-name = "wryview._core"
-features = ["pyo3/extension-module"]
+features = ["pyo3/extension-module", "pyo3/abi3-py310"]
 manylinux = "off"

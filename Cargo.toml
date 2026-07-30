@@ -9,7 +9,7 @@ name = "wryview"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { version = "0.29", features = ["extension-module"] }
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py310"] }
 wry = { version = "0.56", features = ["devtools"] }
 raw-window-handle = "0.6"
 
