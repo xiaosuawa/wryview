@@ -658,10 +658,12 @@ impl WebView {
             // ── Build the webview (inner block returns the Result) ──────────
             {
                 #[cfg(all(unix, not(target_os = "macos")))]
-                if parent_hwnd_kind == Some(&WindowHandleKind::Gtk) {
+                if parent_hwnd_kind == Some(WindowHandleKind::Gtk) {
                     // GTK path — embeds directly in a GTK container.
                     // Works on both X11 and Wayland via GTK's backend abstraction.
                     use gtk::prelude::IsA;
+                    use gtk::glib::translate::FromGlibPtrNone;
+                    use wry::WebViewBuilderExtUnix;
                     let container =
                         unsafe { gtk::Container::from_glib_none(parent_hwnd as *mut _) };
                     builder.build_gtk(&container)
@@ -919,11 +921,15 @@ impl WebView {
         }
         #[cfg(all(unix, not(target_os = "macos")))]
         {
+            let _ = (new_parent, wv);
             return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
                 "reparent is not supported on Linux X11/Wayland — wry needs a GTK container, not a raw XID",
             ));
         }
-        Ok(())
+        #[cfg(not(all(unix, not(target_os = "macos"))))]
+        {
+            Ok(())
+        }
     }
 
     // ── Geometry ───────────────────────────────────────────────────────────
