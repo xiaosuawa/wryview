@@ -8,6 +8,7 @@
 use pyo3::prelude::*;
 use std::cell::RefCell;
 use std::collections::HashMap;
+#[cfg(target_os = "windows")]
 use std::num::NonZero;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -661,7 +662,6 @@ impl WebView {
                 if parent_hwnd_kind == Some(WindowHandleKind::Gtk) {
                     // GTK path — embeds directly in a GTK container.
                     // Works on both X11 and Wayland via GTK's backend abstraction.
-                    use gtk::prelude::IsA;
                     use gtk::glib::translate::FromGlibPtrNone;
                     use wry::WebViewBuilderExtUnix;
                     let container =
