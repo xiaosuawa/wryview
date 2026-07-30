@@ -35,8 +35,8 @@ jobs:
         run: |
           pip install auditwheel
           auditwheel repair \
-            --exclude libwebkit2gtk-4.1 \
-            --exclude libjavascriptcoregtk-4.1 \
+            --exclude 'libwebkit2gtk-4.1.*' \
+            --exclude 'libjavascriptcoregtk-4.1.*' \
             -w dist dist/wryview-*.whl
           rm dist/*-linux_x86_64.whl
       - name: Upload wheels
