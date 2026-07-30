@@ -31,6 +31,13 @@ jobs:
         with:
           target: ${{ matrix.platform.target }}
           args: --release --out dist --find-interpreter
+      - name: Repair manylinux (exclude WebKit2GTK — system provides it)
+        run: |
+          pip install auditwheel
+          auditwheel repair --plat manylinux_2_28_x86_64 \
+            --exclude libwebkit2gtk-4.1 \
+            --exclude libjavascriptcoregtk-4.1 \
+            -w dist dist/wryview-*.whl
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
