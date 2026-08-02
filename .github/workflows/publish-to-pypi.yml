@@ -34,11 +34,13 @@ jobs:
       - name: Repair manylinux (exclude system GTK/GLib — must not bundle)
         run: |
           pip install auditwheel
-          # GLib/GTK libraries can never be bundled into the wheel: the
-          # GObject type system is process-global, so a second GDK copy
-          # breaks any process that also links the system GTK (e.g.
-          # LumiView's tao window → "cannot register existing type
-          # 'GdkDisplayManager'"). The system provides all of these.
+          # GLib/GTK/soup libraries can never be bundled into the wheel:
+          # any system with webkit2gtk-4.1 installed provides the whole
+          # chain as system libs (the webkit .deb depends on them), and the
+          # GObject type registry is process-global — a second copy of a
+          # GObject-based library (gdk, gtk, libsoup, pango, …) breaks any
+          # process that also links the system one (e.g. LumiView's tao
+          # window → "cannot register existing type 'GdkDisplayManager'").
           auditwheel repair \
             --exclude 'libwebkit2gtk-4.1.*' \
             --exclude 'libjavascriptcoregtk-4.1.*' \
@@ -49,6 +51,7 @@ jobs:
             --exclude 'libgobject-2.0.*' \
             --exclude 'libgmodule-2.0.*' \
             --exclude 'libgio-2.0.*' \
+            --exclude 'libsoup-3.*' \
             --exclude 'libpango-1.0.*' \
             --exclude 'libpangocairo-1.0.*' \
             --exclude 'libpangoft2-1.0.*' \
@@ -62,6 +65,18 @@ jobs:
             --exclude 'libxkbcommon.*' \
             --exclude 'libwayland-client.*' \
             --exclude 'libdbus-1.*' \
+            --exclude 'libsqlite3.*' \
+            --exclude 'libkrb5.*' \
+            --exclude 'libgssapi_krb5.*' \
+            --exclude 'libk5crypto.*' \
+            --exclude 'libkrb5support.*' \
+            --exclude 'libcom_err.*' \
+            --exclude 'libkeyutils.*' \
+            --exclude 'libnghttp2.*' \
+            --exclude 'libpsl.*' \
+            --exclude 'libidn2.*' \
+            --exclude 'libunistring.*' \
+            --exclude 'libbrotli*.*' \
             -w dist dist/wryview-*.whl
           rm dist/*-linux_x86_64.whl
       - name: Upload wheels
