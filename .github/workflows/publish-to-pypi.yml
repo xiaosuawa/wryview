@@ -31,12 +31,37 @@ jobs:
         with:
           target: ${{ matrix.platform.target }}
           args: --release --out dist --find-interpreter
-      - name: Repair manylinux (exclude WebKit2GTK — system provides it)
+      - name: Repair manylinux (exclude system GTK/GLib — must not bundle)
         run: |
           pip install auditwheel
+          # GLib/GTK libraries can never be bundled into the wheel: the
+          # GObject type system is process-global, so a second GDK copy
+          # breaks any process that also links the system GTK (e.g.
+          # LumiView's tao window → "cannot register existing type
+          # 'GdkDisplayManager'"). The system provides all of these.
           auditwheel repair \
             --exclude 'libwebkit2gtk-4.1.*' \
             --exclude 'libjavascriptcoregtk-4.1.*' \
+            --exclude 'libgtk-3.*' \
+            --exclude 'libgdk-3.*' \
+            --exclude 'libgdk_pixbuf-2.0.*' \
+            --exclude 'libglib-2.0.*' \
+            --exclude 'libgobject-2.0.*' \
+            --exclude 'libgmodule-2.0.*' \
+            --exclude 'libgio-2.0.*' \
+            --exclude 'libpango-1.0.*' \
+            --exclude 'libpangocairo-1.0.*' \
+            --exclude 'libpangoft2-1.0.*' \
+            --exclude 'libatk-1.0.*' \
+            --exclude 'libatk-bridge-2.0.*' \
+            --exclude 'libharfbuzz.*' \
+            --exclude 'libfribidi.*' \
+            --exclude 'libepoxy.*' \
+            --exclude 'libcairo.*' \
+            --exclude 'libcairo-gobject.*' \
+            --exclude 'libxkbcommon.*' \
+            --exclude 'libwayland-client.*' \
+            --exclude 'libdbus-1.*' \
             -w dist dist/wryview-*.whl
           rm dist/*-linux_x86_64.whl
       - name: Upload wheels

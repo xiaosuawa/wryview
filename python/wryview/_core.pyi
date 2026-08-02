@@ -118,10 +118,10 @@ class WebView:
         javascript_enabled: bool = True,
         hotkeys_zoom: bool = True,
         initialization_script: Optional[str] = None,
-        ipc_handler: Optional[Callable[[str], None]] = None,
+        ipc_handler: Optional[Callable[[str], object]] = None,
         on_navigation: Optional[Callable[[str], bool]] = None,
-        on_page_load: Optional[Callable[[PageLoadEvent, str], None]] = None,
-        on_title_changed: Optional[Callable[[str], None]] = None,
+        on_page_load: Optional[Callable[[PageLoadEvent, str], object]] = None,
+        on_title_changed: Optional[Callable[[str], object]] = None,
         on_new_window: Optional[Callable[[str], Union[NewWindowResponse, str]]] = None,
         drag_drop_handler: Optional[
             Callable[[DragDropEvent, list[str], tuple[int, int]], bool]
@@ -137,7 +137,7 @@ class WebView:
                         bytes,
                         Callable[[int, list[tuple[str, str]], bytes], None],
                     ],
-                    None,
+                    object,
                 ],
             ]
         ] = None,
@@ -151,7 +151,7 @@ class WebView:
         default_context_menus: bool = True,
         on_download_started: Optional[Callable[[str, str], Union[bool, str]]] = None,
         on_download_completed: Optional[
-            Callable[[str, Optional[str], bool], None]
+            Callable[[str, Optional[str], bool], object]
         ] = None,
         as_child: bool = True,
         parent_hwnd_kind: Optional[WindowHandleKind] = None,
@@ -251,13 +251,13 @@ class WebView:
         :meth:`eval_js_with_callback` if you need the result."""
 
     def eval_js_with_callback(
-        self, script: str, callback: Callable[[str], None]
+        self, script: str, callback: Callable[[str], object]
     ) -> None:
         """Execute JavaScript and pass the raw string result to *callback*.
         Use ``json.loads()`` in your callback if you need a Python dict/list."""
     # ── IPC ────────────────────────────────────────────────────────────────
 
-    def set_ipc_handler(self, handler: Callable[[str], None]) -> None:
+    def set_ipc_handler(self, handler: Callable[[str], object]) -> None:
         """Set the IPC message handler (JS: ``window.ipc.postMessage(msg)``)."""
 
     def clear_ipc_handler(self) -> None:
@@ -267,10 +267,10 @@ class WebView:
     def set_on_navigation(self, handler: Callable[[str], bool]) -> None:
         """Set navigation handler.  Return ``False`` to block."""
 
-    def set_on_page_load(self, handler: Callable[[PageLoadEvent, str], None]) -> None:
+    def set_on_page_load(self, handler: Callable[[PageLoadEvent, str], object]) -> None:
         """Set page-load handler.  Receives ``(event: PageLoadEvent, url)``."""
 
-    def set_on_title_changed(self, handler: Callable[[str], None]) -> None:
+    def set_on_title_changed(self, handler: Callable[[str], object]) -> None:
         """Set title-changed handler."""
 
     def set_on_new_window(
@@ -290,7 +290,7 @@ class WebView:
         Return ``False`` to cancel, a new path string to redirect."""
 
     def set_on_download_completed(
-        self, handler: Callable[[str, Optional[str], bool], None]
+        self, handler: Callable[[str, Optional[str], bool], object]
     ) -> None:
         """Set download-completed handler.  Receives ``(url, saved_path, success)``.
         *saved_path* is ``None`` if cancelled."""
