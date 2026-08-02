@@ -123,11 +123,15 @@ struct WebContext {
 impl WebContext {
     #[new]
     #[pyo3(signature = (data_directory = None))]
-    fn new(data_directory: Option<String>) -> Self {
+    fn new(data_directory: Option<String>) -> PyResult<Self> {
+        // webkit2gtk panics ("GTK has not been initialized") before GTK is
+        // initialized — e.g. LumiView examples create a shared WebContext
+        // before the first window exists.
+        init_gtk()?;
         let ctx = wry::WebContext::new(data_directory.map(std::path::PathBuf::from));
-        WebContext {
+        Ok(WebContext {
             inner: Rc::new(RefCell::new(ctx)),
-        }
+        })
     }
 
     #[getter]
@@ -231,6 +235,11 @@ impl WebView {
         as_child: bool,
         #[allow(unused_variables)] parent_hwnd_kind: Option<WindowHandleKind>,
     ) -> PyResult<Self> {
+        // GTK must be initialized before any WebKit API call (webkit2gtk
+        // panics otherwise) — do it first, before owned WebContext creation
+        // below.
+        init_gtk()?;
+
         // ── Callback slots (single Arc, 8 Mutexes inside) ───────────────
         let callbacks = Arc::new(Callbacks {
             ipc: Mutex::new(ipc_handler),
@@ -638,22 +647,6 @@ impl WebView {
             }
             if let Some(ref h) = html {
                 builder = builder.with_html(h);
-            }
-
-            // ── GTK init (Linux only, idempotent) ──────────────────────────
-            #[cfg(all(unix, not(target_os = "macos")))]
-            {
-                match gtk::init() {
-                    Ok(()) => { /* GTK initialized */ }
-                    Err(ref e) => {
-                        // "already initialized" is harmless — gtk::init() is idempotent
-                        if !gtk::is_initialized() {
-                            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                                format!("GTK init failed: {}. Is $DISPLAY set?", e),
-                            ));
-                        }
-                    }
-                }
             }
 
             // ── Build the webview (inner block returns the Result) ──────────
@@ -1298,15 +1291,37 @@ fn pump_events() {
 /// ``webkit2gtk`` crate (which wry uses internally on Linux) checks that
 /// Rust-level flag.
 ///
-/// Call this **once** before creating the first ``WebView`` on Linux.  It is
-/// idempotent — safe to call after Python's ``Gtk.init()`` or multiple times.
-#[pyfunction]
-fn ensure_gtk_init() {
+/// Idempotent — safe to call after Python's ``Gtk.init()`` or multiple
+/// times.  Must run before any WebKit API call: webkit2gtk panics with
+/// "GTK has not been initialized" otherwise.
+fn init_gtk() -> PyResult<()> {
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        let _ = gtk::init(); // idempotent; sets the Rust IS_INITIALIZED atomic
+        match gtk::init() {
+            Ok(()) => Ok(()),
+            Err(ref e) => {
+                // "already initialized" is harmless — gtk::init() is idempotent
+                if !gtk::is_initialized() {
+                    return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                        format!("GTK init failed: {}. Is $DISPLAY set?", e),
+                    ));
+                }
+                Ok(())
+            }
+        }
     }
     // Windows / macOS: nothing needed
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    Ok(())
+}
+
+/// Python-callable: initialise GTK (idempotent, no-op on Windows/macOS).
+///
+/// Call this **once** before creating the first ``WebView`` on Linux when
+/// not going through a windowing framework such as LumiView.
+#[pyfunction]
+fn ensure_gtk_init() {
+    let _ = init_gtk();
 }
 
 // ── Module ─────────────────────────────────────────────────────────────────
