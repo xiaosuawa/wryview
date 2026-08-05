@@ -190,6 +190,10 @@ class WebView:
                 ``document.title`` changes.
             on_new_window: Callable ``(url: str) -> NewWindowResponse``.
             drag_drop_handler: Callable ``(event: DragDropEvent, paths, position) -> bool``.
+                **Windows**: passing a handler disables WebView2's built-in
+                external-file drops (the wry drop target replaces the
+                WebView2 one), so this is decided at construction — see
+                :meth:`set_drag_drop_handler`.
             custom_protocols: Dict mapping scheme names to async handlers.
                 Handler signature: ``(method, uri, headers, body, respond)``.
                 Call ``respond(status, headers, body)`` to reply (any thread OK).
@@ -281,7 +285,13 @@ class WebView:
     def set_drag_drop_handler(
         self, handler: Callable[[DragDropEvent, list[str], tuple[int, int]], bool]
     ) -> None:
-        """Set drag-drop handler.  Receives ``(event: DragDropEvent, paths, position)``."""
+        """Replace the drag-drop handler, or raise ``RuntimeError``.
+
+        Only works when a ``drag_drop_handler`` was passed at construction
+        — wry registers the native drop target at creation, so it cannot
+        be enabled later.  On Windows, having registered it disables
+        WebView2's built-in external-file drops.
+        """
 
     def set_on_download_started(
         self, handler: Callable[[str, str], Union[bool, str]]

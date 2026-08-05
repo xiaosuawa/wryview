@@ -151,6 +151,11 @@ struct WebView {
     // so RefCell is the appropriate interior-mutability primitive here.
     inner: RefCell<Option<wry::WebView>>,
     callbacks: Arc<Callbacks>,
+    // Whether the wry drag-drop handler was registered at construction.
+    // Registering it unconditionally would disable WebView2's built-in
+    // external-file drops on Windows, so it is opt-in via the
+    // `drag_drop_handler` constructor argument.
+    drag_drop_enabled: bool,
     _web_context: Option<SharedWebContext>,
 }
 
@@ -241,6 +246,11 @@ impl WebView {
         init_gtk()?;
 
         // ── Callback slots (single Arc, 8 Mutexes inside) ───────────────
+        // Registering the wry drag-drop handler disables WebView2's
+        // built-in external-file drops (wry calls SetAllowExternalDrop
+        // and overrides the drop target), so it must be opt-in — decided
+        // here, before drag_drop_handler is moved into the Callbacks.
+        let has_drag_drop = drag_drop_handler.is_some();
         let callbacks = Arc::new(Callbacks {
             ipc: Mutex::new(ipc_handler),
             nav: Mutex::new(on_navigation),
@@ -479,8 +489,16 @@ impl WebView {
                 .with_navigation_handler(nav_handler)
                 .with_on_page_load_handler(pageload_handler)
                 .with_document_title_changed_handler(title_handler)
-                .with_new_window_req_handler(newwin_handler)
-                .with_drag_drop_handler(drag_drop_handler)
+                .with_new_window_req_handler(newwin_handler);
+            // Only register the wry drag-drop handler when the Python
+            // caller passed one at construction — registering it
+            // unconditionally would disable WebView2's built-in
+            // external-file drops on Windows even for apps that never
+            // use custom drag-drop events.
+            if has_drag_drop {
+                builder = builder.with_drag_drop_handler(drag_drop_handler);
+            }
+            builder = builder
                 .with_download_started_handler(download_started_handler)
                 .with_download_completed_handler(download_completed_handler);
 
@@ -693,6 +711,7 @@ impl WebView {
         Ok(Self {
             inner: RefCell::new(Some(webview)),
             callbacks,
+            drag_drop_enabled: has_drag_drop,
             _web_context: stored_ctx,
         })
     }
@@ -860,10 +879,20 @@ impl WebView {
         }
     }
 
-    fn set_drag_drop_handler(&self, handler: pyo3::Py<pyo3::PyAny>) {
+    fn set_drag_drop_handler(&self, handler: pyo3::Py<pyo3::PyAny>) -> PyResult<()> {
+        if !self.drag_drop_enabled {
+            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "drag-drop handler was not registered at construction: pass \
+                 drag_drop_handler= when creating the WebView, because \
+                 registering it later is impossible (wry registers the \
+                 handler at creation and it disables WebView2's built-in \
+                 external-file drops)",
+            ));
+        }
         if let Ok(mut g) = self.callbacks.drag_drop.lock() {
             *g = Some(handler);
         }
+        Ok(())
     }
 
     fn set_on_download_started(&self, handler: pyo3::Py<pyo3::PyAny>) {
