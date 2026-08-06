@@ -39,6 +39,14 @@ class DragDropEvent(Enum):
     Unknown = ...
     """Catch-all for future event types (``DragDropEvent`` is non-exhaustive)"""
 
+class Theme(Enum):
+    Auto = ...
+    """Follow the system / OS preference (default)"""
+    Dark = ...
+    """Force dark mode"""
+    Light = ...
+    """Force light mode"""
+
 class WebContext:
     """Sharable browser context for persistent state (cookies, cache, storage).
 
@@ -149,6 +157,7 @@ class WebView:
         headers: Optional[Union[dict[str, str], list[tuple[str, str]]]] = None,
         https_scheme: bool = False,
         default_context_menus: bool = True,
+        theme: Optional[Theme] = None,
         on_download_started: Optional[Callable[[str, str], Union[bool, str]]] = None,
         on_download_completed: Optional[
             Callable[[str, Optional[str], bool], object]
@@ -208,6 +217,10 @@ class WebView:
                 context, enabling Service Workers, Geolocation, Web Crypto, etc.
             default_context_menus: Enable native right-click context menu.
                 Windows only.  Default ``True``.
+            theme: Force a :class:`Theme` (``Dark`` / ``Light`` / ``Auto``).
+                Windows only — affects ``prefers-color-scheme`` in the page.
+                macOS / Linux have no wry theme API and always follow the
+                system preference (silently ignored).
             on_download_started: Callable ``(url, suggested_path) -> bool|str``.
                 Return ``False`` to cancel, or a new path string to redirect.
             on_download_completed: Callable ``(url, saved_path, success)``.
@@ -331,6 +344,15 @@ class WebView:
 
     def set_background_color(self, r: int, g: int, b: int, a: int) -> None:
         """Set background colour after creation.  RGBA, each 0-255."""
+
+    def set_theme(self, theme: Theme) -> None:
+        """Change the webview theme at runtime.
+
+        Windows only — affects ``prefers-color-scheme`` in the page.
+        Requires WebView2 Runtime 101.0.1210.39 or higher.
+        macOS / Linux: raises ``NotImplementedError`` (no wry theme API;
+        the webview always follows the system preference).
+        """
 
     def focus(self) -> None:
         """Move keyboard focus to the webview."""

@@ -38,12 +38,13 @@ from wryview._core import (
     PageLoadEvent,
     NewWindowResponse,
     DragDropEvent,
+    Theme,
     pump_events,
     ensure_gtk_init,
     WindowHandleKind,
 )
 
-__version__ = "0.5.3"
+__version__ = "0.5.4"
 __all__ = [
     "WebView",
     "WebContext",
@@ -51,6 +52,7 @@ __all__ = [
     "PageLoadEvent",
     "NewWindowResponse",
     "DragDropEvent",
+    "Theme",
     "pump_events",
     "ensure_gtk_init",
     "WindowHandleKind",

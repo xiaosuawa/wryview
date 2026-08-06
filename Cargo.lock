@@ -2332,7 +2332,7 @@ dependencies = [
 
 [[package]]
 name = "wryview"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "gtk",
  "pyo3",

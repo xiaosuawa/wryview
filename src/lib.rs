@@ -194,6 +194,7 @@ impl WebView {
         clipboard = true,
         https_scheme = false,
         default_context_menus = true,
+        theme = None,
         data_directory = None,
         web_context = None,
         headers = None,
@@ -232,6 +233,8 @@ impl WebView {
         clipboard: bool,
         https_scheme: bool,
         default_context_menus: bool,
+        #[allow(unused_variables)] // unused on non-Windows — wry only supports themes on Windows
+        theme: Option<Theme>,
         data_directory: Option<String>,
         web_context: Option<pyo3::Py<WebContext>>,
         headers: Option<pyo3::Py<pyo3::PyAny>>,
@@ -629,6 +632,16 @@ impl WebView {
                     builder = builder.with_default_context_menus(false);
                 }
             }
+            // theme: Windows only — controls prefers-color-scheme via WebView2.
+            // macOS / Linux use the system preference and have no wry API for
+            // forcing a theme, so it is silently ignored there.
+            if theme.is_some() {
+                #[cfg(target_os = "windows")]
+                {
+                    use wry::WebViewBuilderExtWindows;
+                    builder = builder.with_theme(theme.unwrap().into());
+                }
+            }
             if let Some(bg) = background_color {
                 builder = builder.with_background_color(bg);
             }
@@ -1018,6 +1031,36 @@ impl WebView {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))
     }
 
+    fn set_theme(&self, theme: Theme) -> PyResult<()> {
+        let guard = self.inner.try_borrow().map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "RefCell borrow error: {}",
+                e
+            ))
+        })?;
+        let wv = guard.as_ref().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("WebView is already closed")
+        })?;
+        #[cfg(target_os = "windows")]
+        {
+            use wry::WebViewExtWindows;
+            wv.set_theme(theme.into()).map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e))
+            })
+        }
+        // macOS / Linux have no wry API to change the theme at runtime —
+        // the webview always follows the system preference.
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = (theme, wv);
+            Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+                "set_theme is only supported on Windows — wry has no theme \
+                 API for macOS or Linux (the webview follows the system \
+                 preference)",
+            ))
+        }
+    }
+
     fn focus(&self) -> PyResult<()> {
         let guard = self.inner.try_borrow().map_err(|e| {
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
@@ -1221,6 +1264,27 @@ impl WebView {
 
 #[pyclass(eq, frozen, hash, from_py_object)]
 #[derive(Clone, PartialEq, Hash)]
+enum Theme {
+    /// Follow the system / OS preference
+    Auto,
+    /// Force dark mode
+    Dark,
+    /// Force light mode
+    Light,
+}
+
+impl From<Theme> for wry::Theme {
+    fn from(t: Theme) -> Self {
+        match t {
+            Theme::Auto => wry::Theme::Auto,
+            Theme::Dark => wry::Theme::Dark,
+            Theme::Light => wry::Theme::Light,
+        }
+    }
+}
+
+#[pyclass(eq, frozen, hash, from_py_object)]
+#[derive(Clone, PartialEq, Hash)]
 enum WindowHandleKind {
     /// Windows HWND
     Win32,
@@ -1360,6 +1424,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<WebContext>()?;
     m.add_class::<WebView>()?;
     m.add_class::<CookieDict>()?;
+    m.add_class::<Theme>()?;
     m.add_class::<WindowHandleKind>()?;
     m.add_class::<PageLoadEvent>()?;
     m.add_class::<NewWindowResponse>()?;
