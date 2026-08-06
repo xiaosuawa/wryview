@@ -22,6 +22,12 @@ wryview 是 [wry](https://github.com/tauri-apps/wry)（[Tauri](https://tauri.app
 
 基于 [PyO3](https://pyo3.rs) 构建，以预编译 wheel 分发（终端用户无需 Rust 工具链）。
 
+## 💡 想要完整的桌面应用框架？
+
+wryview 是**组件**而非框架：它只提供 webview，窗口、事件循环和 UI 脚手架都需要你自己搭建。需要把 webview 嵌入已有的 Qt/tkinter/原生窗口？wryview 正是为此而生。
+
+从零开始做一个桌面应用？试试 **[LumiView](https://github.com/xiaosuawa/LumiView)** —— 基于 wryview 构建的 Pythonic 桌面应用框架。它开箱即用地提供原生窗口、事件循环、JS Bridge（IPC）、自定义协议和 async-first API。LumiView 以 wryview 作为 WebView 引擎，渲染核心相同，但省去了所有管道工作。
+
 ## ✨ 特性
 
 - **零事件循环** — webview 作为你的窗口的子控件创建。GUI 框架拥有事件循环，无冲突、无死锁。
@@ -86,6 +92,7 @@ wv = WebView(hwnd, custom_protocols={"myapp": my_handler}, url="myapp://localhos
 
 ## 🧩 使用案例
 
+- **[LumiView](https://github.com/xiaosuawa/LumiView)** — 基于 wryview 的 Pythonic 桌面应用框架（原生窗口、事件循环、JS Bridge、自定义协议）。**在 wryview 之上构建完整桌面应用的首选方式。**
 - **[QtWebView](https://github.com/xiaosuawa/QtWebView)** — 基于 wryview 的跨平台 Qt webview 组件（PySide/PyQt）。将 wry WebView 作为原生子窗口嵌入 Qt widget，提供 JS Bridge 和 WSGI 支持。
 
 ## 🤝 贡献

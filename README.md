@@ -22,6 +22,12 @@ wryview is a Python binding for [wry](https://github.com/tauri-apps/wry), the cr
 
 Built on [PyO3](https://pyo3.rs) and distributed as pre-compiled wheels (no Rust toolchain required for end users).
 
+## 💡 Looking for a Full Desktop Framework?
+
+wryview is a **component**, not a framework: it gives you the webview, but you bring your own window, event loop, and UI scaffolding. Embedding a webview into an existing Qt/tkinter/native window? wryview is for you.
+
+Starting a new desktop app from scratch? Try **[LumiView](https://github.com/xiaosuawa/LumiView)** — a Pythonic desktop app framework built on wryview. It adds native windows, an event loop, a JS bridge (IPC), custom protocols, and an async-first API, all out of the box. wryview powers LumiView's WebView engine, so you get the same rendering core with none of the plumbing.
+
 ## ✨ Features
 
 - **Zero Event Loop** — wryview creates the webview as a child of *your* window. Your GUI framework owns the event loop. No conflicts, no deadlocks.
@@ -86,6 +92,7 @@ Full constructor options: `transparent`, `background_color`, `incognito`, `user_
 
 ## 🧩 Used By
 
+- **[LumiView](https://github.com/xiaosuawa/LumiView)** — A Pythonic desktop app framework (native windows, event loop, JS bridge, custom protocols) with wryview as its WebView engine. **The recommended way to build a complete desktop app on wryview.**
 - **[QtWebView](https://github.com/xiaosuawa/QtWebView)** — A cross-platform webview widget for Qt (PySide/PyQt), powered by wryview. Embeds a wry WebView as a native child window inside any Qt widget, with a seamless JS bridge and WSGI support.
 
 ## 🤝 Contributing
