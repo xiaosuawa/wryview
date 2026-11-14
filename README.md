@@ -10,17 +10,26 @@
 
 ---
 
-## ⚠️ Status: Pre-Alpha
+## Status: Alpha
 
-wryview is in early development. The API may change without notice between versions. It was created to serve [QtWebView](https://github.com/xiaosuawa/QtWebView), a Qt webview widget project, and the author is a Rust beginner — the binding code may not be idiomatic. Feedback, bug reports, and contributions (code or ideas) are very welcome.
+wryview is a small, focused Python binding for [wry](https://github.com/tauri-apps/wry).
+It started as the WebView layer of [QtWebView](https://github.com/xiaosuawa/QtWebView)
+and is now a standalone component used by QtWebView and
+[LumiView](https://github.com/xiaosuawa/LumiView). The Python API is still 0.x:
+minor releases may change it. Bug reports and contributions are welcome.
 
 ---
 
 ## 📖 Introduction
 
-wryview is a Python binding for [wry](https://github.com/tauri-apps/wry), the cross-platform WebView rendering library used by [Tauri](https://tauri.app). It wraps the full wry API — no event loop, no window management, just the webview.
+wryview embeds wry's WebView into a window owned by your application. It does
+not create a top-level window and does not run an event loop — your GUI
+framework keeps its own loop and passes a native parent handle. With
+`as_child=False`, wry keeps the WebView sized to the host window; in the default
+child mode the WebView is a child control and you manage its bounds.
 
-Built on [PyO3](https://pyo3.rs) and distributed as pre-compiled wheels (no Rust toolchain required for end users).
+Built on [PyO3](https://pyo3.rs) and distributed as prebuilt wheels, so wheel
+users do not need a Rust toolchain.
 
 ## 💡 Looking for a Full Desktop Framework?
 
@@ -30,11 +39,23 @@ Starting a new desktop app from scratch? Try **[LumiView](https://github.com/xia
 
 ## ✨ Features
 
-- **Zero Event Loop** — wryview creates the webview as a child of *your* window. Your GUI framework owns the event loop. No conflicts, no deadlocks.
-- **Full wry API** — Navigation, JavaScript execution, IPC (`window.ipc.postMessage`), custom protocols, cookies, drag & drop, proxy, devtools, zoom, and more.
-- **Cross-Platform** — Windows (WebView2), macOS (WKWebView), Linux (WebKitGTK). Same API everywhere.
-- **Framework-Agnostic** — Embed into Qt, tkinter, wxPython, or any native window via HWND/NSView/XID.
-- **Pre-Built Wheels** — `pip install wryview` just works. No Rust, no cmake, no system deps (beyond the OS webview).
+- **No event loop of its own** — your framework owns the loop. On Linux, when
+  the host loop is not GTK (for example Qt's xcb backend), call `pump_events()`
+  periodically and `ensure_gtk_init()` once before creating the first WebView
+  (both are exported by `wryview`).
+- **Broad wry coverage** — navigation, JavaScript evaluation, IPC, custom
+  protocols, cookies, drag & drop, proxy, DevTools, zoom, downloads, themes
+  (Windows), shared `WebContext`, and more. Platform-specific wry builder
+  extensions (macOS `accept_first_mouse`, Windows `browser_accelerator_keys`,
+  Linux `extension_path`) are not wrapped yet.
+- **Cross-platform** — Windows (WebView2), macOS (WKWebView), Linux
+  (WebKitGTK 4.1). The Python API is the same; platform-specific details are
+  noted below.
+- **Framework-agnostic** — embed into Qt, tkinter/wxPython (platform-dependent),
+  or any native window via HWND / NSView / X11 XID. On Wayland, pass a GTK
+  container and `parent_hwnd_kind=WindowHandleKind.Gtk`.
+- **Prebuilt wheels** — `pip install wryview` for CPython 3.10–3.15, including
+  free-threaded 3.15 (`abi3.abi3t` wheels).
 
 ## ⬇️ Installation
 
@@ -42,20 +63,31 @@ Starting a new desktop app from scratch? Try **[LumiView](https://github.com/xia
 pip install wryview
 ```
 
-**Windows:** WebView2 Runtime is required (pre-installed on Windows 10 1803+, or [download](https://developer.microsoft.com/microsoft-edge/webview2/)).  
-**macOS:** WKWebView is built-in.  
-**Linux:** Requires `libwebkit2gtk-4.1-dev` and related packages (see [wry docs](https://github.com/tauri-apps/wry#readme)).
+**Windows:** WebView2 Runtime is required (often preinstalled on Windows 11 and
+recent Windows 10, or [download](https://developer.microsoft.com/microsoft-edge/webview2/)).
+**macOS:** WKWebView is built in.
+**Linux:** WebKitGTK 4.1 and GTK 3 runtime libraries are required
+(Debian/Ubuntu: `libwebkit2gtk-4.1-0`, `libgtk-3-0`; Fedora:
+`webkit2gtk4.1`, `gtk3`). The `-dev` packages are only needed when building
+from source.
+
+**Python:** 3.10+; the 3.15 wheels support both the GIL and free-threaded
+builds. Free-threaded 3.14 has no wheels — the `abi3t` stable ABI starts at
+3.15. Building from source requires Rust 1.85+ (PyO3 0.30).
 
 ## 🧑‍💻 Usage
 
 ```python
-from wryview import WebView
+from wryview import WebView, WindowHandleKind
 
-# Embed as a child of any native window (default)
+# Embed as a child of a native window (default)
 wv = WebView(parent_hwnd, url="https://example.com", devtools=True)
 
-# Fill an independent window — wry manages size via WM_SIZE / layout
+# Fill an independent window — wry keeps the webview sized to the host window
 wv = WebView(anchor_hwnd, url="https://example.com", as_child=False)
+
+# Wayland: the parent is a GTK container, not an X11 XID
+# wv = WebView(gtk_container_ptr, parent_hwnd_kind=WindowHandleKind.Gtk, url=...)
 
 # JS execution
 wv.eval_js("document.body.style.background = '#333'")
@@ -63,32 +95,50 @@ wv.eval_js("document.body.style.background = '#333'")
 # JS → Python IPC (JS side: window.ipc.postMessage('hello'))
 wv.set_ipc_handler(lambda msg: print(f"JS says: {msg}"))
 
-# Navigation callback
+# Page lifecycle
 wv.set_on_page_load(lambda event, url: print(f"{event}: {url}"))
 
-# Custom protocol (intercept requests asynchronously)
+# Custom protocol: request/response headers are lists of (name, value) pairs
 def my_handler(method, uri, headers, body, respond):
-    # respond(status, headers, body) must be called from any thread
-    respond(200, {"Content-Type": "text/html"}, b"<h1>Hello from Python!</h1>")
+    # Call respond exactly once. It may be called from any thread.
+    respond(200, [("Content-Type", "text/html")], b"<h1>Hello from Python!</h1>")
 
-wv = WebView(hwnd, custom_protocols={"myapp": my_handler}, url="myapp://localhost/")
+wv = WebView(parent_hwnd, custom_protocols={"myapp": my_handler}, url="myapp://localhost/")
 ```
+
+> **Linux embedding note:** WebKitGTK renders on the GLib main context. If the
+> host loop is not GTK, call `pump_events()` periodically (for example from a
+> 16 ms timer). Call `ensure_gtk_init()` once before creating the first
+> WebView. Both helpers are exported by `wryview`.
 
 ## 📦 API Summary
 
 | Category | Methods |
 |----------|---------|
-| Content | `load_url`, `load_html`, `load_url_with_headers`, `reload`, `url` |
+| Content | `load_url`, `load_url_with_headers`, `load_html`, `reload`, `url` |
 | JavaScript | `eval_js`, `eval_js_with_callback` |
 | IPC | `set_ipc_handler`, `clear_ipc_handler` |
-| Callbacks | `set_on_navigation`, `set_on_page_load`, `set_on_title_changed`, `set_on_new_window`, `set_drag_drop_handler` |
-| Geometry | `set_bounds`, `bounds` |
-| Appearance | `set_visible`, `set_background_color`, `focus` |
+| Callbacks | `set_on_navigation`, `set_on_page_load`, `set_on_title_changed`, `set_on_new_window`, `set_drag_drop_handler`, `set_on_download_started`, `set_on_download_completed` |
+| Geometry | `set_bounds`, `bounds`, `reparent` |
+| Appearance | `set_visible`, `set_background_color`, `set_theme` (Windows), `focus` |
 | DevTools | `open_devtools`, `close_devtools`, `is_devtools_open` |
 | Cookies | `cookies`, `cookies_for_url`, `set_cookie`, `delete_cookie` |
+| Lifecycle | `close` |
 | Other | `zoom`, `print`, `clear_all_browsing_data` |
+| Linux helpers | `pump_events`, `ensure_gtk_init` |
 
-Full constructor options: `transparent`, `background_color`, `incognito`, `user_agent`, `autoplay`, `initialization_script`, `proxy`, `back_forward_gestures`, `clipboard`, and more.
+Constructor options: `width`, `height`, `url`, `html`, `transparent`,
+`background_color`, `visible`, `devtools`, `incognito`, `user_agent`,
+`focused`, `autoplay`, `javascript_enabled`, `hotkeys_zoom`,
+`initialization_script`, `ipc_handler`, `on_navigation`, `on_page_load`,
+`on_title_changed`, `on_new_window`, `drag_drop_handler`, `custom_protocols`,
+`proxy`, `back_forward_gestures`, `clipboard`, `data_directory`,
+`web_context`, `headers`, `https_scheme`, `default_context_menus`, `theme`
+(Windows), `on_download_started`, `on_download_completed`, `as_child`,
+`parent_hwnd_kind`.
+
+`WebContext` can be shared across WebViews to share cookies, cache and
+storage. See `python/wryview/_core.pyi` for the complete signatures.
 
 ## 🧩 Used By
 
@@ -97,7 +147,9 @@ Full constructor options: `transparent`, `background_color`, `incognito`, `user_
 
 ## 🤝 Contributing
 
-The author is a Rust beginner — if you see something that could be improved, please open an issue or PR. All contributions (code, ideas, documentation) are welcome.
+The Rust layer is intentionally small (`src/lib.rs`); the Python package lives
+in `python/wryview`. Contributions of code, documentation, and ideas are
+welcome.
 
 ## License
 

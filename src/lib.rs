@@ -1296,7 +1296,7 @@ enum WindowHandleKind {
     Gtk,
 }
 
-#[pyclass(eq, frozen, hash, skip_from_py_object)]
+#[pyclass(eq, frozen, hash)]
 #[derive(Clone, PartialEq, Hash)]
 enum PageLoadEvent {
     Started,
@@ -1310,7 +1310,7 @@ enum NewWindowResponse {
     Deny,
 }
 
-#[pyclass(eq, frozen, hash, skip_from_py_object)]
+#[pyclass(eq, frozen, hash)]
 #[derive(Clone, PartialEq, Hash)]
 enum DragDropEvent {
     Enter,
@@ -1322,7 +1322,7 @@ enum DragDropEvent {
 
 // ── Cookie dict helper ────────────────────────────────────────────────────
 
-#[pyclass(skip_from_py_object)]
+#[pyclass]
 #[derive(Clone)]
 struct CookieDict {
     #[pyo3(get)]
@@ -1419,7 +1419,10 @@ fn ensure_gtk_init() {
 
 // ── Module ─────────────────────────────────────────────────────────────────
 
-#[pymodule]
+// Free-threading: callback slots are behind Mutexes and the native webview is
+// unsendable, so free-threaded builds can keep the GIL disabled (required for
+// the abi3t stable ABI).
+#[pymodule(gil_used = false)]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<WebContext>()?;
     m.add_class::<WebView>()?;

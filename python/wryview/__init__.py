@@ -1,5 +1,5 @@
 """
-wryview — Minimal wry webview binding for Python.
+wryview — Python binding for wry, the cross-platform WebView library.
 
 Usage:
     from wryview import WebView, CookieDict, WebContext
@@ -44,7 +44,7 @@ from wryview._core import (
     WindowHandleKind,
 )
 
-__version__ = "0.5.4"
+__version__ = "0.5.5"
 __all__ = [
     "WebView",
     "WebContext",
