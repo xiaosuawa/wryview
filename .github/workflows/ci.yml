@@ -1,0 +1,115 @@
+name: CI
+
+# Pull-request / main-branch validation. Release wheels are built by
+# publish-to-pypi.yml on tags only.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  MATURIN_VERSION: v1.16.0
+
+jobs:
+  meta:
+    name: version stamps
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Check pyproject / Cargo / __init__ versions
+        run: python .github/scripts/check_versions.py
+
+  test:
+    name: build + import (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+          - macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Linux WebKit + GTK deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libglib2.0-dev
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ci-${{ matrix.os }}
+
+      - name: Build abi3 wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          maturin-version: ${{ env.MATURIN_VERSION }}
+          command: build
+          args: --out dist --interpreter python
+          manylinux: off
+
+      - name: Verify wheel tag and contents
+        run: python .github/scripts/verify_wheel.py cp310-abi3
+
+      - name: Install and import
+        shell: bash
+        run: |
+          python -m pip install --no-deps dist/*.whl
+          python -c "import wryview; print(wryview.__version__)"
+
+  # The two stable-ABI families that need a non-default interpreter. Building
+  # them on every PR catches maturin/PyO3 regressions before a release.
+  stable-abi:
+    name: ${{ matrix.kind }} (${{ matrix.python }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { python: "3.14t", kind: cp314t, tag: cp314-cp314t }
+          - { python: "3.15t", kind: abi3t, tag: cp315-abi3.abi3t }
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Linux WebKit + GTK deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libglib2.0-dev
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ci-${{ matrix.kind }}
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          maturin-version: ${{ env.MATURIN_VERSION }}
+          command: build
+          args: --out dist --interpreter python
+          manylinux: off
+      - name: Verify wheel tag and contents
+        run: python .github/scripts/verify_wheel.py "${{ matrix.tag }}"
+      - name: Install and import
+        shell: bash
+        run: |
+          python -m pip install --no-deps dist/*.whl
+          python -c "import wryview; print(wryview.__version__)"

@@ -49,7 +49,7 @@ wryview 是**组件**而非框架：它只提供 webview，窗口、事件循环
   （HWND / NSView / X11 XID）。Wayland 下需要传 GTK container 并设置
   `parent_hwnd_kind=WindowHandleKind.Gtk`。
 - **预编译 Wheel** — `pip install wryview`，支持 CPython 3.10–3.15，包括
-  3.15 自由线程构建（`abi3.abi3t` wheel）。
+  3.14 自由线程（`cp314t`）与 3.15+ 自由线程（`abi3.abi3t` wheel）。
 
 ## ⬇️ 安装
 
@@ -64,8 +64,8 @@ pip install wryview
 （Debian/Ubuntu：`libwebkit2gtk-4.1-0`、`libgtk-3-0`；Fedora：
 `webkit2gtk4.1`、`gtk3`）。`-dev` 包只在从源码构建时需要。
 
-**Python：** 3.10+；3.15 的 wheel 同时支持 GIL 和自由线程构建。3.14 自由线程
-没有 wheel——`abi3t` 稳定 ABI 从 3.15 开始。从源码构建需要 Rust 1.85+（PyO3 0.30）。
+**Python：** 3.10+；3.14 自由线程有独立的 `cp314t` wheel，3.15+ 使用
+`abi3.abi3t` wheel，GIL 与自由线程构建通用。从源码构建需要 Rust 1.85+（PyO3 0.30）。
 
 ## 🧑‍💻 使用示例
 

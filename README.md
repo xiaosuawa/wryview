@@ -55,7 +55,7 @@ Starting a new desktop app from scratch? Try **[LumiView](https://github.com/xia
   or any native window via HWND / NSView / X11 XID. On Wayland, pass a GTK
   container and `parent_hwnd_kind=WindowHandleKind.Gtk`.
 - **Prebuilt wheels** — `pip install wryview` for CPython 3.10–3.15, including
-  free-threaded 3.15 (`abi3.abi3t` wheels).
+  free-threaded 3.14 (`cp314t`) and free-threaded 3.15+ (`abi3.abi3t` wheels).
 
 ## ⬇️ Installation
 
@@ -71,9 +71,9 @@ recent Windows 10, or [download](https://developer.microsoft.com/microsoft-edge/
 `webkit2gtk4.1`, `gtk3`). The `-dev` packages are only needed when building
 from source.
 
-**Python:** 3.10+; the 3.15 wheels support both the GIL and free-threaded
-builds. Free-threaded 3.14 has no wheels — the `abi3t` stable ABI starts at
-3.15. Building from source requires Rust 1.85+ (PyO3 0.30).
+**Python:** 3.10+; free-threaded 3.14 has its own `cp314t` wheel, and 3.15+
+uses the `abi3.abi3t` wheel, which works on both the GIL and free-threaded
+builds. Building from source requires Rust 1.85+ (PyO3 0.30).
 
 ## 🧑‍💻 Usage
 
