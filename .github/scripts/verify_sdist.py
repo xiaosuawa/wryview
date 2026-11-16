@@ -28,6 +28,7 @@ def main() -> int:
         "Cargo.lock",
         "python/wryview/__init__.py",
         "python/wryview/_core.pyi",
+        "python/wryview/py.typed",
     ]
     missing = [
         path for path in required if f"{prefix}/{path}" not in names

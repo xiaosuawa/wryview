@@ -36,6 +36,7 @@ def main() -> int:
     required = [
         "wryview/__init__.py",
         "wryview/_core.pyi",
+        "wryview/py.typed",
     ]
     missing = [name for name in required if name not in names]
     if missing:
